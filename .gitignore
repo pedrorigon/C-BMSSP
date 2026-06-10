@@ -1,0 +1,50 @@
+# CMake and build directories
+/build/
+/out/
+/cmake-build-*/
+/CMakeCache.txt
+/CMakeFiles/
+/CTestTestfile.cmake
+/Testing/
+/cmake_install.cmake
+/compile_commands.json
+/install_manifest.txt
+/Makefile
+/build.ninja
+/.ninja_deps
+/.ninja_log
+
+# C and C++ build artifacts
+*.a
+*.d
+*.dll
+*.dylib
+*.exe
+*.o
+*.obj
+*.so
+*.so.*
+
+# Coverage, profiling, and sanitizer output
+*.gcda
+*.gcno
+*.gcov
+*.profdata
+*.profraw
+coverage/
+coverage*.info
+
+# Runtime and test output
+*.log
+/core
+/core.*
+
+# Editor and operating-system files
+.cache/
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db

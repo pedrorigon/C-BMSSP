@@ -1,0 +1,55 @@
+#pragma once
+
+#include "graph.h"
+#include "path_result.h"
+
+#include <cstddef>
+#include <optional>
+#include <vector>
+
+namespace sssp {
+
+namespace detail {
+class BlockQueue;
+}
+
+struct SolverOptions {
+  std::size_t minimum_optimized_vertices{50'000};
+  std::size_t minimum_optimized_edges{200'000};
+};
+
+class SequentialSolver {
+public:
+  explicit SequentialSolver(const Graph& graph, SolverOptions options = {});
+  virtual ~SequentialSolver() = default;
+
+  [[nodiscard]] PathResult solve(Vertex source, Vertex goal);
+
+protected:
+  const Graph& graph_;
+  std::vector<double> distances_;
+  std::vector<Vertex> predecessors_;
+  std::vector<bool> complete_;
+  std::size_t k_;
+  std::size_t t_;
+  SolverOptions options_;
+
+  void reset();
+  void validate_query(Vertex source, Vertex goal) const;
+  [[nodiscard]] PathResult solve_small_graph(Vertex source, Vertex goal);
+  void complete_shortest_paths(Vertex goal);
+  [[nodiscard]] PathResult solve_optimized(Vertex source, Vertex goal);
+  [[nodiscard]] std::pair<double, std::vector<Vertex>> bounded_search(std::size_t level,
+                                                                      double bound,
+                                                                      std::vector<Vertex> pivots,
+                                                                      std::optional<Vertex> goal);
+  [[nodiscard]] std::pair<double, std::vector<Vertex>>
+  base_case(double bound, const std::vector<Vertex>& frontier, std::optional<Vertex> goal);
+  [[nodiscard]] virtual std::pair<std::vector<Vertex>, std::vector<Vertex>>
+  find_pivots(double bound, const std::vector<Vertex>& frontier);
+  void relax_completed(const std::vector<Vertex>& completed_vertices, double lower_bound,
+                       double upper_bound, detail::BlockQueue& data_structure);
+  [[nodiscard]] std::vector<Vertex> reconstruct_path(Vertex source, Vertex goal) const;
+};
+
+} // namespace sssp

@@ -1,0 +1,7 @@
+c Small valid directed graph
+p sp 4 5
+a 1 2 1.5
+a 1 3 10
+a 2 3 2.5
+a 3 4 1
+a 2 4 8
