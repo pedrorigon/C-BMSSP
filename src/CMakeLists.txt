@@ -7,6 +7,7 @@ add_library(
     core/graph.cpp
     core/parallel_solver.cpp
     core/sequential_solver.cpp
+    core/snap_reader.cpp
 )
 add_library(sssp::sssp ALIAS sssp)
 

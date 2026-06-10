@@ -39,6 +39,46 @@ PathResult SequentialSolver::solve(const Vertex source, const Vertex goal) {
   return solve_optimized(source, goal);
 }
 
+std::vector<double> SequentialSolver::solve_all(const Vertex source) {
+  if (source >= graph_.vertex_count()) {
+    throw std::out_of_range("query vertex is outside graph");
+  }
+
+  // Small graphs: a plain Dijkstra over the whole graph. Larger graphs use the
+  // BMSSP machinery with no goal so the full shortest-path tree is built.
+  if (graph_.vertex_count() < options_.minimum_optimized_vertices ||
+      graph_.edge_count() < options_.minimum_optimized_edges) {
+    reset();
+    distances_[source] = 0.0;
+    std::priority_queue<QueueEntry, std::vector<QueueEntry>, std::greater<>> queue;
+    queue.emplace(0.0, source);
+    while (!queue.empty()) {
+      const auto [distance, vertex] = queue.top();
+      queue.pop();
+      if (distance > distances_[vertex]) {
+        continue;
+      }
+      for (const auto& edge : graph_.edges_from(vertex)) {
+        const double candidate = distance + edge.weight;
+        if (candidate < distances_[edge.to]) {
+          distances_[edge.to] = candidate;
+          predecessors_[edge.to] = vertex;
+          queue.emplace(candidate, edge.to);
+        }
+      }
+    }
+    return distances_;
+  }
+
+  reset();
+  distances_[source] = 0.0;
+  const auto max_level = static_cast<std::size_t>(
+      std::ceil(std::log(static_cast<double>(graph_.vertex_count())) / static_cast<double>(t_)));
+  static_cast<void>(bounded_search(max_level, infinity, {source}, std::nullopt));
+  complete_shortest_paths(std::nullopt);
+  return distances_;
+}
+
 void SequentialSolver::reset() {
   std::fill(distances_.begin(), distances_.end(), infinity);
   std::fill(predecessors_.begin(), predecessors_.end(), graph_.vertex_count());
@@ -78,7 +118,7 @@ PathResult SequentialSolver::solve_small_graph(const Vertex source, const Vertex
   return {};
 }
 
-void SequentialSolver::complete_shortest_paths(const Vertex goal) {
+void SequentialSolver::complete_shortest_paths(const std::optional<Vertex> goal) {
   std::priority_queue<QueueEntry, std::vector<QueueEntry>, std::greater<>> queue;
   for (Vertex vertex = 0; vertex < graph_.vertex_count(); ++vertex) {
     if (distances_[vertex] != infinity) {
@@ -94,7 +134,7 @@ void SequentialSolver::complete_shortest_paths(const Vertex goal) {
       continue;
     }
     complete_[vertex] = true;
-    if (vertex == goal) {
+    if (goal && vertex == *goal) {
       return;
     }
     for (const auto& edge : graph_.edges_from(vertex)) {

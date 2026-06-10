@@ -22,6 +22,11 @@ target_compile_definitions(
     dimacs_reader_unit_test
     PRIVATE SSSP_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data"
 )
+add_sssp_test(snap_reader_unit_test unit/snap_reader_test.cpp)
+target_compile_definitions(
+    snap_reader_unit_test
+    PRIVATE SSSP_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data"
+)
 add_sssp_test(block_queue_unit_test unit/block_queue_test.cpp)
 add_sssp_test(sequential_solver_unit_test unit/sequential_solver_test.cpp)
 add_sssp_test(parallel_solver_unit_test unit/parallel_solver_test.cpp)
@@ -62,9 +67,23 @@ target_link_libraries(
     PRIVATE sssp::sssp validation::dijkstra sssp_project_options sssp_project_warnings
 )
 
+add_executable(sssp_benchmark comparison/benchmark_cli.cpp)
+target_link_libraries(
+    sssp_benchmark
+    PRIVATE sssp::sssp validation::dijkstra sssp_project_options sssp_project_warnings
+)
+
+add_executable(sssp_scaling comparison/scaling_cli.cpp)
+target_link_libraries(
+    sssp_scaling
+    PRIVATE sssp::sssp sssp_test_support validation::dijkstra
+            sssp_project_options sssp_project_warnings
+)
+
 set_tests_properties(
     graph_unit_test
     dimacs_reader_unit_test
+    snap_reader_unit_test
     block_queue_unit_test
     sequential_solver_unit_test
     parallel_solver_unit_test

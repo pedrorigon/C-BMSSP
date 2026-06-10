@@ -25,6 +25,10 @@ public:
 
   [[nodiscard]] PathResult solve(Vertex source, Vertex goal);
 
+  // Full single-source shortest paths (source to every vertex, no early exit).
+  // Returns the distance to each vertex; used by the scalability benchmark.
+  [[nodiscard]] std::vector<double> solve_all(Vertex source);
+
 protected:
   const Graph& graph_;
   std::vector<double> distances_;
@@ -37,7 +41,7 @@ protected:
   void reset();
   void validate_query(Vertex source, Vertex goal) const;
   [[nodiscard]] PathResult solve_small_graph(Vertex source, Vertex goal);
-  void complete_shortest_paths(Vertex goal);
+  void complete_shortest_paths(std::optional<Vertex> goal);
   [[nodiscard]] PathResult solve_optimized(Vertex source, Vertex goal);
   [[nodiscard]] std::pair<double, std::vector<Vertex>> bounded_search(std::size_t level,
                                                                       double bound,

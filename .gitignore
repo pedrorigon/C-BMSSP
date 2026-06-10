@@ -38,6 +38,11 @@ coverage*.info
 *.log
 /core
 /core.*
+/output/
+/plots/
+
+# Downloaded SNAP datasets (too large for GitHub; auto re-downloaded if missing)
+/data/
 
 # Editor and operating-system files
 .cache/
@@ -48,3 +53,10 @@ coverage*.info
 *~
 .DS_Store
 Thumbs.db
+*.pyc
+__pycache__/
+
+# Python virtual environment (managed by uv; pyproject.toml + uv.lock are tracked)
+.venv/
+
+bmssp-python/
