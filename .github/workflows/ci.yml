@@ -7,9 +7,8 @@ on:
     branches: [develop]
     tags: ["v*"]
 
-# Workflow-level: read-only by default.
-# actions: write is required for cancel-in-progress to cancel sibling runs.
-# The release job overrides contents to write.
+# Deny-all at workflow level; jobs that need more grant it explicitly.
+# actions: write is required by the runner to honour cancel-in-progress.
 permissions:
   contents: read
   actions: write
@@ -23,12 +22,13 @@ env:
 
 jobs:
   # -----------------------------------------------------------------------
-  # Build in Release mode and run the full CTest suite.
-  # On tag pushes, also packages and uploads the CLI binaries as an artifact
-  # so the release job can pick them up without rebuilding.
+  # Gate: compile in Release mode.  The three test jobs won't start until
+  # this passes, ensuring we don't burn CI minutes on a broken build.
+  # On tag pushes the CLI binaries are also packaged and uploaded here so
+  # the release job can reuse the exact same artifact that was tested.
   # -----------------------------------------------------------------------
   build:
-    name: Build & Test
+    name: Build
     runs-on: ubuntu-latest
 
     steps:
@@ -45,9 +45,6 @@ jobs:
 
       - name: Build
         run: cmake --build --preset release -j$(nproc)
-
-      - name: Test
-        run: ctest --preset release --output-on-failure
 
       - name: Compute SHA-256 checksums
         if: startsWith(github.ref, 'refs/tags/v')
@@ -72,12 +69,39 @@ jobs:
           retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
 
   # -----------------------------------------------------------------------
-  # Build in Debug mode with AddressSanitizer + UndefinedBehaviorSanitizer
-  # and run the full test suite. OMP_NUM_THREADS=2 is set by the ctest preset.
+  # Run the full CTest suite in Release mode.
+  # -----------------------------------------------------------------------
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    needs: [build]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends cmake ninja-build g++
+
+      - name: Configure
+        run: cmake --preset release
+
+      - name: Build
+        run: cmake --build --preset release -j$(nproc)
+
+      - name: Test
+        run: ctest --preset release --output-on-failure
+
+  # -----------------------------------------------------------------------
+  # Full test suite compiled with AddressSanitizer + UndefinedBehaviorSanitizer.
+  # OMP_NUM_THREADS=2 is injected by the ctest preset in CMakePresets.json.
   # -----------------------------------------------------------------------
   sanitizers:
-    name: Test (AddressSanitizer + UBSan)
+    name: Sanitizers (ASan + UBSan)
     runs-on: ubuntu-latest
+    needs: [build]
 
     steps:
       - name: Checkout
@@ -98,13 +122,15 @@ jobs:
         run: ctest --preset sanitizers --output-on-failure
 
   # -----------------------------------------------------------------------
-  # Build with coverage instrumentation (--coverage / gcov), run tests,
-  # then produce an HTML + Cobertura XML report via gcovr filtered to src/.
-  # The HTML artifact can be downloaded and opened in a browser locally.
+  # Build with gcov instrumentation, run tests, then generate an HTML +
+  # Cobertura XML report via gcovr (filtered to src/).
+  # Results are posted to the GitHub Actions job summary so they appear
+  # inline in the PR and push views without leaving GitHub.
   # -----------------------------------------------------------------------
   coverage:
     name: Coverage (gcovr)
     runs-on: ubuntu-latest
+    needs: [build]
 
     steps:
       - name: Checkout
@@ -135,8 +161,59 @@ jobs:
             --exclude-throw-branches \
             --html-details coverage/index.html \
             --xml coverage/coverage.xml \
+            --json-summary coverage/summary.json \
             --print-summary \
             build/tests
+
+      - name: Post coverage summary to job
+        run: |
+          python3 - <<'PYEOF'
+          import json, os
+
+          with open("coverage/summary.json") as f:
+              data = json.load(f)
+
+          def pct(val):
+              return float(val) if val is not None else 0.0
+
+          def badge(p):
+              if p >= 90: return "🟢"
+              if p >= 75: return "🟡"
+              return "🔴"
+
+          lp = pct(data.get("line_percent"))
+          bp = pct(data.get("branch_percent"))
+          fp = pct(data.get("function_percent"))
+
+          md = f"""\
+          ## Code Coverage
+
+          | Metric | Covered / Total | Percentage | |
+          |--------|-----------------|:----------:|-|
+          | Lines | {data.get('line_covered', 0)} / {data.get('line_total', 0)} | **{lp:.1f}%** | {badge(lp)} |
+          | Branches | {data.get('branch_covered', 0)} / {data.get('branch_total', 0)} | **{bp:.1f}%** | {badge(bp)} |
+          | Functions | {data.get('function_covered', 0)} / {data.get('function_total', 0)} | **{fp:.1f}%** | {badge(fp)} |
+
+          > 🟢 ≥ 90% &nbsp;&nbsp; 🟡 ≥ 75% &nbsp;&nbsp; 🔴 < 75%
+
+          <details><summary>Per-file breakdown</summary>
+
+          | File | Lines | Branches | Functions |
+          |------|------:|---------:|----------:|
+          """
+
+          for entry in sorted(data.get("files", []), key=lambda x: x.get("filename", "")):
+              name = entry.get("filename", "")
+              flp = pct(entry.get("line_percent"))
+              fbp = pct(entry.get("branch_percent"))
+              ffp = pct(entry.get("function_percent"))
+              md += f"| `{name}` | {flp:.1f}% | {fbp:.1f}% | {ffp:.1f}% |\n"
+
+          md += "\n</details>\n"
+
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+              f.write(md)
+          PYEOF
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
@@ -146,15 +223,14 @@ jobs:
           retention-days: 30
 
   # -----------------------------------------------------------------------
-  # Creates a GitHub Release from the binaries built (and already tested)
-  # by the build job. Only runs on tag pushes; requires all other jobs to
-  # pass first.
+  # Creates a GitHub Release from the binaries produced by the build job.
+  # Only runs on tag pushes, and only after all three test jobs pass.
   # -----------------------------------------------------------------------
   release:
     name: Create Release
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build, sanitizers, coverage]
+    needs: [test, sanitizers, coverage]
     permissions:
       contents: write
 
@@ -166,7 +242,12 @@ jobs:
           path: artifacts/
 
       - name: Make binaries executable
-        run: chmod +x artifacts/sssp_compare artifacts/sssp_benchmark artifacts/sssp_batch_results artifacts/sssp_scaling
+        run: |
+          chmod +x \
+            artifacts/sssp_compare \
+            artifacts/sssp_benchmark \
+            artifacts/sssp_batch_results \
+            artifacts/sssp_scaling
 
       - name: Verify SHA-256 checksums
         working-directory: artifacts
