@@ -33,7 +33,9 @@ PLOTS_DIR = ROOT / "plots"
 SCALING_EXECUTABLE = ROOT / "build" / "release" / "test" / "sssp_scaling"
 
 DEFAULT_ITERATIONS = 10
-DEFAULT_DEGREE = 4
+DEFAULT_TOPOLOGY = "banded"
+DEFAULT_DEGREE = 2
+DEFAULT_BANDWIDTH = 64
 DEFAULT_SEED = 42
 DEFAULT_MAX_VERTICES = 10_000_000
 DEFAULT_STEPS = 12
@@ -42,7 +44,9 @@ CSV_FIELDS = [
     "run_timestamp",
     "model",
     "type",
+    "topology",
     "avg_degree",
+    "bandwidth",
     "seed",
     "iterations",
     "samples_used",
@@ -83,10 +87,28 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--topology",
+        choices=("banded", "random"),
+        default=DEFAULT_TOPOLOGY,
+        help=(
+            "Graph shape: 'banded' (large diameter, favours BMSSP) or 'random' "
+            f"(small-world). Default: {DEFAULT_TOPOLOGY}."
+        ),
+    )
+    parser.add_argument(
         "--avg-degree",
         type=int,
         default=DEFAULT_DEGREE,
         help=f"Average out-degree of the generated graphs (default: {DEFAULT_DEGREE}).",
+    )
+    parser.add_argument(
+        "--bandwidth",
+        type=int,
+        default=DEFAULT_BANDWIDTH,
+        help=(
+            "For the banded topology, the maximum forward edge span; smaller means "
+            f"a larger diameter (default: {DEFAULT_BANDWIDTH})."
+        ),
     )
     parser.add_argument(
         "--seed",
@@ -157,14 +179,22 @@ def run_build(console: Console) -> None:
 
 
 def run_scaling_once(
-    model: str, implementation_type: str, degree: int, seed: int, sizes: list[int]
+    model: str,
+    implementation_type: str,
+    topology: str,
+    degree: int,
+    bandwidth: int,
+    seed: int,
+    sizes: list[int],
 ) -> tuple[dict[int, dict[str, int]], dict[tuple[int, str, str], dict[str, Any]]]:
     """Run the executable once over all sizes; return graph metadata and results."""
     command = [
         str(SCALING_EXECUTABLE),
         model,
         implementation_type,
+        topology,
         str(degree),
+        str(bandwidth),
         str(seed),
         *(str(size) for size in sizes),
     ]
@@ -213,7 +243,8 @@ def run_scaling(
     for iteration in range(1, args.iterations + 1):
         console.detail(f"Iteration {iteration}/{args.iterations}")
         graphs_run, results_run = run_scaling_once(
-            model, implementation_type, args.avg_degree, args.seed, sizes
+            model, implementation_type, args.topology, args.avg_degree,
+            args.bandwidth, args.seed, sizes,
         )
         if not graphs:
             graphs = graphs_run
@@ -234,7 +265,9 @@ def run_scaling(
             "run_timestamp": run_timestamp,
             "model": identity["model"],
             "type": identity["type"],
+            "topology": args.topology,
             "avg_degree": args.avg_degree,
+            "bandwidth": args.bandwidth,
             "seed": args.seed,
             "iterations": args.iterations,
             "reachable": identity["reachable"],
@@ -272,7 +305,10 @@ def main() -> int:
 
     console.title("C-BMSSP Scalability Benchmark (generated graphs)")
     console.detail(f"Model: {model} | Type: {implementation_type}")
-    console.detail(f"Avg degree: {args.avg_degree} | Seed: {args.seed} | Iterations: {args.iterations}")
+    console.detail(
+        f"Topology: {args.topology} | Avg degree: {args.avg_degree} | "
+        f"Bandwidth: {args.bandwidth} | Seed: {args.seed} | Iterations: {args.iterations}"
+    )
     console.detail(f"Sizes (vertices): {', '.join(f'{size:,}' for size in sizes)}")
 
     try:
@@ -292,7 +328,7 @@ def main() -> int:
 
     console.step("Generating scaling plots")
     subtitle = (
-        f"Generated sparse graphs (avg degree {args.avg_degree}), full SSSP, "
+        f"Generated {args.topology} sparse graphs (avg degree {args.avg_degree}), full SSSP, "
         f"mean of {args.iterations} runs (IQR outlier removal, 95% t-Student CI)"
     )
     target_dir = PLOTS_DIR / "scaling"

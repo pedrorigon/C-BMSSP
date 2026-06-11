@@ -81,9 +81,9 @@ void validate_selection(const std::string_view model, const std::string_view typ
 } // namespace
 
 int main(const int argc, const char* argv[]) {
-  if (argc < 6) {
+  if (argc < 8) {
     std::cerr << "usage: sssp_scaling <all|bmssp|dijkstra> <all|sequential|parallel> "
-                 "<avg-degree> <seed> <vertices> [<vertices> ...]\n";
+                 "<random|banded> <avg-degree> <bandwidth> <seed> <vertices> [<vertices> ...]\n";
     return EXIT_FAILURE;
   }
 
@@ -92,23 +92,29 @@ int main(const int argc, const char* argv[]) {
     const std::string_view type = argv[2];
     validate_selection(model, type);
 
-    const auto degree = std::stoull(argv[3]);
-    const auto seed = static_cast<std::uint64_t>(std::stoull(argv[4]));
+    const std::string_view topology = argv[3];
+    if (topology != "random" && topology != "banded") {
+      throw std::invalid_argument("topology must be random or banded");
+    }
+    const auto degree = std::stoull(argv[4]);
+    const auto bandwidth = std::stoull(argv[5]);
+    const auto seed = static_cast<std::uint64_t>(std::stoull(argv[6]));
     if (degree < 1) {
       throw std::invalid_argument("avg-degree must be at least 1");
     }
 
     std::cout << std::setprecision(17);
     std::size_t step = 0;
-    for (int index = 5; index < argc; ++index) {
+    for (int index = 7; index < argc; ++index) {
       const auto vertices = std::stoull(argv[index]);
       if (vertices < 2) {
         throw std::invalid_argument("vertices must be at least 2");
       }
-      // make_random_graph adds a path backbone (n - 1 edges) for connectivity,
-      // then `extra_edges` random weighted edges. Avg out-degree ~= degree.
-      const std::size_t extra_edges = (degree - 1) * vertices;
-      const sssp::Graph graph = test::make_random_graph(vertices, extra_edges, seed);
+      sssp::Graph graph =
+          topology == "banded"
+              ? test::make_banded_graph(vertices, degree, bandwidth, seed)
+              // random: path backbone (n-1 edges) + (degree-1)*n random edges.
+              : test::make_random_graph(vertices, (degree - 1) * vertices, seed);
       run_graph(graph, step++, model, type);
     }
   } catch (const std::exception& error) {

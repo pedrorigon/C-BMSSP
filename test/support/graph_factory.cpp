@@ -39,4 +39,30 @@ sssp::Graph make_random_graph(const std::size_t vertex_count, const std::size_t 
   return graph;
 }
 
+sssp::Graph make_banded_graph(const std::size_t vertex_count, const std::size_t degree,
+                              const std::size_t bandwidth, const std::uint64_t seed) {
+  sssp::Graph graph(vertex_count);
+  if (vertex_count < 2) {
+    return graph;
+  }
+  const std::size_t span = std::max<std::size_t>(bandwidth, 1);
+
+  std::mt19937_64 generator(seed);
+  std::uniform_int_distribution<std::size_t> offset_distribution(1, span);
+  std::uniform_real_distribution<double> weight_distribution(0.01, 100.0);
+  for (sssp::Vertex vertex = 0; vertex < vertex_count; ++vertex) {
+    // Path backbone keeps the graph connected and the diameter large.
+    if (vertex + 1 < vertex_count) {
+      graph.add_edge(vertex, vertex + 1, weight_distribution(generator));
+    }
+    for (std::size_t edge = 1; edge < degree; ++edge) {
+      const std::size_t target = vertex + offset_distribution(generator);
+      if (target < vertex_count) {
+        graph.add_edge(vertex, target, weight_distribution(generator));
+      }
+    }
+  }
+  return graph;
+}
+
 } // namespace test

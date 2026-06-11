@@ -94,6 +94,18 @@ void test_generated_graphs() {
       }
     }
   }
+
+  // The large-diameter banded generator must yield the same distances too.
+  for (std::uint64_t seed = 1; seed <= 4; ++seed) {
+    const sssp::Graph graph = test::make_banded_graph(800, 3, 16, seed);
+    validation::DijkstraSolver sequential(graph);
+    validation::ParallelDijkstraSolver parallel(graph);
+    for (const sssp::Vertex source : {sssp::Vertex{0}, sssp::Vertex{400}}) {
+      require_same_distances(sequential.solve_all(source), parallel.solve_all(source));
+      test::compare_with_dijkstra(graph, parallel, source, sssp::Vertex{799},
+                                  "parallel Dijkstra banded graph");
+    }
+  }
 }
 
 void run_tests() {

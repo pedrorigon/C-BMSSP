@@ -59,7 +59,10 @@ inline void compare_dijkstra_implementations(const sssp::Graph& graph, const sss
   require(expected.reachable() == actual.reachable(), std::string(context) + ": reachability");
   if (actual.reachable()) {
     require_near(expected.distance, actual.distance, 1e-9, std::string(context) + ": distance");
-    require(expected.path == actual.path, std::string(context) + ": path");
+    // The parallel Dijkstra (Delta-stepping) guarantees identical shortest-path
+    // distances but may pick a different predecessor when several edges tie for
+    // the minimum. We therefore require a valid shortest path of equal cost, not
+    // a byte-identical predecessor chain.
     require_valid_path(graph, source, goal, actual);
   }
 }

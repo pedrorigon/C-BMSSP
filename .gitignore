@@ -58,5 +58,3 @@ __pycache__/
 
 # Python virtual environment (managed by uv; pyproject.toml + uv.lock are tracked)
 .venv/
-
-bmssp-python/

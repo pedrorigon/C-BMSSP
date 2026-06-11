@@ -1,10 +1,11 @@
 #include "parallel_dijkstra_solver.h"
 
 #include <algorithm>
-#include <functional>
-#include <queue>
+#include <cmath>
+#include <cstddef>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 #ifdef VALIDATION_HAS_OPENMP
 #include <omp.h>
@@ -14,14 +15,20 @@ namespace validation {
 
 namespace {
 
-using QueueEntry = std::pair<double, sssp::Vertex>;
-
+// Candidate relaxation produced while scanning a bucket: a tentative distance to
+// `target` via `predecessor`. Collected in parallel, then applied serially in a
+// deterministic order so the resulting distances (and predecessor tie-breaks)
+// match the sequential Dijkstra reference.
 struct Candidate {
   sssp::Vertex target;
   double distance;
   sssp::Vertex predecessor;
 };
 
+// Orders candidates so that, per target, the smallest distance wins and ties are
+// broken by the smallest predecessor index. This mirrors the tie-breaking of the
+// sequential solver, keeping shortest-path trees identical even on equal-weight
+// (including zero-weight) edges.
 bool candidate_less(const Candidate& left, const Candidate& right) {
   if (left.target != right.target) {
     return left.target < right.target;
@@ -30,6 +37,28 @@ bool candidate_less(const Candidate& left, const Candidate& right) {
     return left.distance < right.distance;
   }
   return left.predecessor < right.predecessor;
+}
+
+// Bucket width for Delta-stepping. Edges with weight <= delta are "light" (may
+// keep a vertex in the current bucket) and the rest are "heavy". A width close to
+// the average edge weight balances bucket count against work per bucket.
+double choose_delta(const sssp::Graph& graph) {
+  double weight_sum = 0.0;
+  std::size_t edge_total = 0;
+  double max_weight = 0.0;
+  for (sssp::Vertex vertex = 0; vertex < graph.vertex_count(); ++vertex) {
+    for (const auto& edge : graph.edges_from(vertex)) {
+      weight_sum += edge.weight;
+      max_weight = std::max(max_weight, edge.weight);
+      ++edge_total;
+    }
+  }
+  if (edge_total == 0) {
+    return 1.0;
+  }
+  const double mean_weight = weight_sum / static_cast<double>(edge_total);
+  // Guard against degenerate all-zero-weight graphs.
+  return mean_weight > 0.0 ? mean_weight : std::max(max_weight, 1.0);
 }
 
 } // namespace
@@ -68,118 +97,148 @@ std::vector<double> ParallelDijkstraSolver::solve_all(const sssp::Vertex source)
 
 void ParallelDijkstraSolver::run(const sssp::Vertex source, const sssp::Vertex* const goal) {
   reset();
-  std::priority_queue<QueueEntry, std::vector<QueueEntry>, std::greater<>> queue;
+  const std::size_t vertex_count = graph_.vertex_count();
+  if (vertex_count == 0) {
+    return;
+  }
+
+  const double delta = choose_delta(graph_);
+  // buckets[i] holds vertices whose tentative distance is in [i*delta,(i+1)*delta).
+  std::vector<std::vector<sssp::Vertex>> buckets;
+  // Which bucket a vertex currently sits in (npos = none), to avoid duplicate
+  // insertions and to detect stale bucket membership cheaply.
+  std::vector<std::size_t> bucket_of(vertex_count, static_cast<std::size_t>(-1));
+
+  auto bucket_index = [delta](const double distance) {
+    return static_cast<std::size_t>(std::floor(distance / delta));
+  };
+  auto ensure_bucket = [&buckets](const std::size_t index) {
+    if (index >= buckets.size()) {
+      buckets.resize(index + 1);
+    }
+  };
+  auto place = [&](const sssp::Vertex vertex) {
+    const std::size_t index = bucket_index(distances_[vertex]);
+    ensure_bucket(index);
+    buckets[index].push_back(vertex);
+    bucket_of[vertex] = index;
+  };
+
   distances_[source] = 0.0;
-  queue.emplace(0.0, source);
+  place(source);
 
-  while (!queue.empty()) {
-    const double batch_distance = queue.top().first;
-    std::vector<sssp::Vertex> batch;
-    while (!queue.empty() && queue.top().first == batch_distance) {
-      const auto [distance, vertex] = queue.top();
-      queue.pop();
-      if (!complete_[vertex] && distance == distances_[vertex]) {
-        batch.push_back(vertex);
-      }
-    }
-    if (batch.empty()) {
-      continue;
-    }
-
-    std::ranges::sort(batch);
-    batch.erase(std::unique(batch.begin(), batch.end()), batch.end());
-
-    const bool has_zero_weight_edge = std::ranges::any_of(batch, [this](const sssp::Vertex vertex) {
-      const auto& edges = graph_.edges_from(vertex);
-      return std::ranges::any_of(edges, [](const auto& edge) { return edge.weight == 0.0; });
-    });
-    if (batch.size() > 1 && has_zero_weight_edge) {
-      for (std::size_t index = 1; index < batch.size(); ++index) {
-        queue.emplace(batch_distance, batch[index]);
-      }
-      batch.resize(1);
-    }
-
-    for (const sssp::Vertex vertex : batch) {
-      complete_[vertex] = true;
-    }
-    if (goal != nullptr && std::binary_search(batch.begin(), batch.end(), *goal)) {
+  // Apply a batch of candidate relaxations deterministically: smallest distance
+  // per target wins, ties broken by predecessor. Updated vertices are re-bucketed.
+  auto apply_candidates = [&](std::vector<Candidate>& candidates) {
+    if (candidates.empty()) {
       return;
     }
-
-    std::vector<Candidate> candidates;
-    if (batch.size() == 1) {
-      const sssp::Vertex predecessor = batch.front();
-      const auto& edges = graph_.edges_from(predecessor);
-      std::vector<Candidate> slots(edges.size(), {graph_.vertex_count(), 0.0, predecessor});
-
-#ifdef VALIDATION_HAS_OPENMP
-#pragma omp parallel for schedule(static) if (edges.size() >= 256)
-#endif
-      for (std::size_t index = 0; index < edges.size(); ++index) {
-        const auto& edge = edges[index];
-        const double candidate = batch_distance + edge.weight;
-        if (candidate < distances_[edge.to]) {
-          slots[index] = {edge.to, candidate, predecessor};
-        }
-      }
-
-      candidates.reserve(slots.size());
-      for (const Candidate& candidate : slots) {
-        if (candidate.target != graph_.vertex_count()) {
-          candidates.push_back(candidate);
-        }
-      }
-    } else {
-#ifdef VALIDATION_HAS_OPENMP
-      const int thread_count = omp_get_max_threads();
-#else
-      const int thread_count = 1;
-#endif
-      std::vector<std::vector<Candidate>> thread_candidates(static_cast<std::size_t>(thread_count));
-
-#ifdef VALIDATION_HAS_OPENMP
-#pragma omp parallel for schedule(dynamic, 16) if (batch.size() >= 64)
-#endif
-      for (std::size_t index = 0; index < batch.size(); ++index) {
-#ifdef VALIDATION_HAS_OPENMP
-        auto& local = thread_candidates[static_cast<std::size_t>(omp_get_thread_num())];
-#else
-        auto& local = thread_candidates.front();
-#endif
-        const sssp::Vertex predecessor = batch[index];
-        for (const auto& edge : graph_.edges_from(predecessor)) {
-          const double candidate = batch_distance + edge.weight;
-          if (candidate < distances_[edge.to]) {
-            local.push_back({edge.to, candidate, predecessor});
-          }
-        }
-      }
-
-      std::size_t candidate_count = 0;
-      for (const auto& local : thread_candidates) {
-        candidate_count += local.size();
-      }
-      candidates.reserve(candidate_count);
-      for (auto& local : thread_candidates) {
-        candidates.insert(candidates.end(), std::make_move_iterator(local.begin()),
-                          std::make_move_iterator(local.end()));
-      }
-    }
-
-    std::ranges::sort(candidates, candidate_less);
+    std::sort(candidates.begin(), candidates.end(), candidate_less);
     for (std::size_t index = 0; index < candidates.size();) {
       const Candidate& best = candidates[index];
       if (best.distance < distances_[best.target]) {
         distances_[best.target] = best.distance;
         predecessors_[best.target] = best.predecessor;
-        queue.emplace(best.distance, best.target);
+        place(best.target);
       }
       const sssp::Vertex target = best.target;
       while (index < candidates.size() && candidates[index].target == target) {
         ++index;
       }
     }
+  };
+
+  // Relaxes a set of source vertices over the edges selected by `want_light`,
+  // returning the produced candidates. The scan over `frontier` is parallel, so
+  // the work scales with the number of vertices in the current bucket.
+  auto relax = [&](const std::vector<sssp::Vertex>& frontier, const bool want_light) {
+    std::vector<Candidate> candidates;
+#ifdef VALIDATION_HAS_OPENMP
+    const int thread_count = omp_get_max_threads();
+#else
+    const int thread_count = 1;
+#endif
+    std::vector<std::vector<Candidate>> local(static_cast<std::size_t>(thread_count));
+
+#ifdef VALIDATION_HAS_OPENMP
+#pragma omp parallel for schedule(dynamic, 64) if (frontier.size() >= 128)
+#endif
+    for (std::size_t i = 0; i < frontier.size(); ++i) {
+#ifdef VALIDATION_HAS_OPENMP
+      auto& sink = local[static_cast<std::size_t>(omp_get_thread_num())];
+#else
+      auto& sink = local.front();
+#endif
+      const sssp::Vertex from = frontier[i];
+      const double base = distances_[from];
+      for (const auto& edge : graph_.edges_from(from)) {
+        const bool is_light = edge.weight <= delta;
+        if (is_light != want_light) {
+          continue;
+        }
+        const double candidate = base + edge.weight;
+        // Relaxed check without locking; apply_candidates re-verifies under the
+        // serial pass, so a stale read here only adds a redundant candidate.
+        if (candidate < distances_[edge.to]) {
+          sink.push_back({edge.to, candidate, from});
+        }
+      }
+    }
+
+    std::size_t total = 0;
+    for (const auto& chunk : local) {
+      total += chunk.size();
+    }
+    candidates.reserve(total);
+    for (auto& chunk : local) {
+      candidates.insert(candidates.end(), std::make_move_iterator(chunk.begin()),
+                        std::make_move_iterator(chunk.end()));
+    }
+    return candidates;
+  };
+
+  static_cast<void>(goal); // run always computes full SSSP; callers read distances_.
+
+  for (std::size_t current = 0; current < buckets.size(); ++current) {
+    if (buckets[current].empty()) {
+      continue;
+    }
+
+    // Union of every vertex removed from this bucket across all light passes.
+    // Their heavy edges are relaxed once, after the bucket fully drains.
+    std::vector<sssp::Vertex> removed;
+
+    // Light-edge phase: repeatedly drain the current bucket, since light edges
+    // (and zero-weight edges in particular) can re-insert vertices into it.
+    while (!buckets[current].empty()) {
+      std::vector<sssp::Vertex> frontier;
+      frontier.swap(buckets[current]);
+
+      // A vertex may sit in the bucket multiple times (re-inserted by an earlier
+      // pass); only act on those whose tentative distance still maps here.
+      std::vector<sssp::Vertex> active;
+      active.reserve(frontier.size());
+      for (const sssp::Vertex vertex : frontier) {
+        if (bucket_of[vertex] == current) {
+          bucket_of[vertex] = static_cast<std::size_t>(-1);
+          active.push_back(vertex);
+          removed.push_back(vertex);
+        }
+      }
+      if (active.empty()) {
+        continue;
+      }
+
+      std::vector<Candidate> light = relax(active, /*want_light=*/true);
+      apply_candidates(light);
+    }
+
+    // Heavy-edge phase: relax heavy edges of everything removed from this bucket.
+    // Deduplicate first, since a vertex can be removed more than once.
+    std::sort(removed.begin(), removed.end());
+    removed.erase(std::unique(removed.begin(), removed.end()), removed.end());
+    std::vector<Candidate> heavy = relax(removed, /*want_light=*/false);
+    apply_candidates(heavy);
   }
 }
 

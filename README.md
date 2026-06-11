@@ -145,19 +145,21 @@ Pass `--skip-build` to reuse an existing executable.
 
 `run_scaling.py` measures how the solvers scale by running **full single-source
 shortest paths** on generated **sparse weighted** graphs of increasing size. This
-exposes the BMSSP advantage (`O(m log^(2/3) n)`) over Dijkstra (`O(m + n log n)`)
-as the graph grows — real weights are required, since unit weights reduce SSSP to
-a BFS. Graphs are generated deterministically (fixed `--seed`), so every
-iteration measures the same problem. Results go to a CSV under `output/` plus
-linear and log-Y plots (PDF + JPG) under `plots/scaling/`.
+targets the regime where the BMSSP advantage (`O(m log^(2/3) n)`) over Dijkstra
+(`O(m + n log n)`) can appear: large, very sparse (`m ≈ n`) graphs with real
+weights and a large diameter. The default `banded` topology builds such graphs
+(each vertex links forward within `--bandwidth`); `--topology random` produces a
+small-world graph instead. Real weights are required — unit weights reduce SSSP
+to a BFS, where the algorithms tie. Graphs are generated deterministically (fixed
+`--seed`), so every iteration measures the same problem. Results go to a CSV under
+`output/` plus linear and log-Y plots (PDF + JPG) under `plots/scaling/`.
 
 ```bash
-uv run python run_scaling.py                                   # up to 10M vertices
+uv run python run_scaling.py                                   # banded, up to 10M vertices
 uv run python run_scaling.py --max-vertices 1000000 --steps 8  # quicker run
-uv run python run_scaling.py --avg-degree 8 --iterations 20
+uv run python run_scaling.py --topology random --avg-degree 4  # small-world variant
+uv run python run_scaling.py --bandwidth 16 --iterations 20    # deeper graph, more samples
 ```
-
-Pass `--skip-build` to reuse an existing executable.
 
 ## References
 
