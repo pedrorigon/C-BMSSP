@@ -144,22 +144,33 @@ Pass `--skip-build` to reuse an existing executable.
 ## Scalability Benchmark
 
 `run_scaling.py` measures how the solvers scale by running **full single-source
-shortest paths** on generated **sparse weighted** graphs of increasing size. This
-targets the regime where the BMSSP advantage (`O(m log^(2/3) n)`) over Dijkstra
-(`O(m + n log n)`) can appear: large, very sparse (`m ≈ n`) graphs with real
-weights and a large diameter. The default `banded` topology builds such graphs
-(each vertex links forward within `--bandwidth`); `--topology random` produces a
-small-world graph instead. Real weights are required — unit weights reduce SSSP
-to a BFS, where the algorithms tie. Graphs are generated deterministically (fixed
-`--seed`), so every iteration measures the same problem. Results go to a CSV under
-`output/` plus linear and log-Y plots (PDF + JPG) under `plots/scaling/`.
+shortest paths** on generated **weighted** graphs of increasing size. Graphs are
+generated deterministically (fixed `--seed`), so every iteration measures the
+same problem, and real weights are required — unit weights reduce SSSP to a BFS
+where everything ties. The default `random` topology (moderate density) gives the
+parallel solvers enough work per distance level to scale; `--topology banded`
+builds a large-diameter sparse graph instead. Results go to a CSV under `output/`
+plus linear and log-Y plots (PDF + JPG) under `plots/scaling/`.
 
 ```bash
-uv run python run_scaling.py                                   # banded, up to 10M vertices
+uv run python run_scaling.py                                   # random, up to 10M vertices
 uv run python run_scaling.py --max-vertices 1000000 --steps 8  # quicker run
-uv run python run_scaling.py --topology random --avg-degree 4  # small-world variant
-uv run python run_scaling.py --bandwidth 16 --iterations 20    # deeper graph, more samples
+uv run python run_scaling.py --avg-degree 16                   # denser graph
+uv run python run_scaling.py --topology banded --avg-degree 2  # large-diameter sparse
 ```
+
+### Interpreting the results
+
+- **Parallel Dijkstra** (Δ-stepping) is ~2–2.5× faster than sequential Dijkstra
+  on the default moderately dense random graphs, and the speedup grows with size.
+  On `banded` graphs the diameter is large and each distance level holds few
+  vertices, so there is little to parallelise and the speedup drops toward 1×.
+- **BMSSP** ties Dijkstra on **full SSSP**. This is structural, not a tuning
+  issue: after its bounded recursion, the solver runs a full Dijkstra
+  `complete_shortest_paths` pass to finalise any vertices the recursion left
+  incomplete, so a full-SSSP BMSSP run is essentially "BMSSP work + a Dijkstra".
+  The BMSSP advantage only materialises on **point-to-point queries with early
+  exit** (as in the dataset benchmark), where that final pass stops at the goal.
 
 ## References
 

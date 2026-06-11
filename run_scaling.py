@@ -33,8 +33,12 @@ PLOTS_DIR = ROOT / "plots"
 SCALING_EXECUTABLE = ROOT / "build" / "release" / "test" / "sssp_scaling"
 
 DEFAULT_ITERATIONS = 10
-DEFAULT_TOPOLOGY = "banded"
-DEFAULT_DEGREE = 2
+# Defaults target a moderately dense random graph: enough vertices share each
+# distance level for the parallel solvers to extract real speedup. The banded
+# topology (large diameter, --topology banded) is available for the sparse,
+# inherently more serial regime that favours the BMSSP sequential solver.
+DEFAULT_TOPOLOGY = "random"
+DEFAULT_DEGREE = 8
 DEFAULT_BANDWIDTH = 64
 DEFAULT_SEED = 42
 DEFAULT_MAX_VERTICES = 10_000_000

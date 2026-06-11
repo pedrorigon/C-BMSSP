@@ -51,8 +51,6 @@ protected:
   base_case(double bound, const std::vector<Vertex>& frontier, std::optional<Vertex> goal);
   [[nodiscard]] virtual std::pair<std::vector<Vertex>, std::vector<Vertex>>
   find_pivots(double bound, const std::vector<Vertex>& frontier);
-  void relax_completed(const std::vector<Vertex>& completed_vertices, double lower_bound,
-                       double upper_bound, detail::BlockQueue& data_structure);
   [[nodiscard]] std::vector<Vertex> reconstruct_path(Vertex source, Vertex goal) const;
 };
 

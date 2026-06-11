@@ -41,12 +41,9 @@ public:
     return find_pivots(bound, frontier);
   }
 
-  void relax(const std::vector<sssp::Vertex>& vertices, const double lower_bound,
-             const double upper_bound, sssp::detail::BlockQueue& queue) {
-    relax_completed(vertices, lower_bound, upper_bound, queue);
-  }
-
   void complete(const sssp::Vertex goal) { complete_shortest_paths(goal); }
+
+  [[nodiscard]] std::size_t k_value() const { return k_; }
 
   [[nodiscard]] std::vector<sssp::Vertex> path(const sssp::Vertex source,
                                                const sssp::Vertex goal) const {
@@ -65,9 +62,13 @@ void test_base_case_and_completion() {
 
   SolverHarness solver(graph);
   solver.initialize(0);
+  // Algorithm 2 settles at most k+1 of the closest vertices. With more than k+1
+  // vertices reachable, it returns the tightened boundary and only the vertices
+  // strictly below it (so at most k vertices are reported as complete).
   const auto [bound, visited] = solver.run_base_case(sssp::infinity, {0});
-  test::require(bound == sssp::infinity, "base case changed the bound");
-  test::require(visited.size() == 1'001, "base case processing limit was not applied");
+  test::require(bound < sssp::infinity, "base case did not tighten the bound");
+  test::require(visited.size() <= solver.k_value(),
+                "base case reported more than k complete vertices");
 
   solver.initialize(0);
   solver.complete(1);
@@ -98,16 +99,6 @@ void test_search_and_relaxation() {
   const auto [pivots, working_set] = solver.select_pivots(sssp::infinity, {0});
   test::require(!pivots.empty(), "pivot selection returned no pivots");
   test::require(working_set.size() >= 4, "pivot selection did not expand the frontier");
-
-  solver.initialize(0);
-  sssp::detail::BlockQueue queue(4, 30.0);
-  solver.relax({0}, 10.0, 20.0, queue);
-  const auto [remaining_bound, prepended] = queue.pull();
-  test::require(prepended == std::vector<sssp::Vertex>({1}), "lower-bound batch is incorrect");
-  test::require_near(12.0, remaining_bound, 1e-9, "queued minimum is incorrect");
-  const auto [final_bound, queued] = queue.pull();
-  test::require(queued == std::vector<sssp::Vertex>({2}), "bounded insertion is incorrect");
-  test::require_near(30.0, final_bound, 1e-9, "final queue bound is incorrect");
 }
 
 void run_tests() {

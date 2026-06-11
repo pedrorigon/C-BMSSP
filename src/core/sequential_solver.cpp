@@ -172,9 +172,6 @@ SequentialSolver::bounded_search(const std::size_t level, const double bound,
 
   auto [selected_pivots, working_set] = find_pivots(bound, pivots);
   pivots = std::move(selected_pivots);
-  if (working_set.size() > k_ * pivots.size()) {
-    return {bound, std::move(working_set)};
-  }
 
   detail::BlockQueue data_structure(capped_power_of_two((level - 1) * t_), bound);
   double current_bound = infinity;
@@ -185,6 +182,13 @@ SequentialSolver::bounded_search(const std::size_t level, const double bound,
     }
   }
 
+  // Algorithm 3 (BMSSP), recursive case. We pull a block (B_i, S_i) from D,
+  // recurse to settle U_i, then relax U_i's edges into the two distance bands:
+  //   [B_i, B)      -> Insert into D (handled in the current sub-problem later),
+  //   [B'_i, B_i)   -> BatchPrepend (pulled before the current block's range).
+  // Crucially, vertices of S_i that the sub-call did NOT complete (their distance
+  // fell back into [B'_i, B_i)) are batch-prepended too, so the search keeps
+  // expanding instead of stalling.
   std::vector<Vertex> result;
   const std::size_t max_result_size = k_ * capped_power_of_two(level * t_);
   while (result.size() < max_result_size && !data_structure.empty()) {
@@ -196,12 +200,46 @@ SequentialSolver::bounded_search(const std::size_t level, const double bound,
       break;
     }
 
-    auto [sub_bound, sub_result] = bounded_search(level - 1, subset_bound, std::move(subset), goal);
+    auto [sub_bound, sub_result] =
+        bounded_search(level - 1, subset_bound, std::vector<Vertex>(subset), goal);
     result.insert(result.end(), sub_result.begin(), sub_result.end());
-    relax_completed(sub_result, subset_bound, bound, data_structure);
     current_bound = std::min(current_bound, sub_bound);
+
+    std::vector<std::pair<Vertex, double>> prepend;
+    for (const Vertex vertex : sub_result) {
+      complete_[vertex] = true;
+      for (const auto& edge : graph_.edges_from(vertex)) {
+        const double candidate = distances_[vertex] + edge.weight;
+        if (candidate < distances_[edge.to]) {
+          distances_[edge.to] = candidate;
+          predecessors_[edge.to] = vertex;
+          if (candidate >= subset_bound && candidate < bound) {
+            data_structure.insert(edge.to, candidate);
+          } else if (candidate >= sub_bound && candidate < subset_bound) {
+            prepend.emplace_back(edge.to, candidate);
+          }
+        }
+      }
+    }
+    // Re-queue the S_i vertices the sub-call left incomplete in [B'_i, B_i).
+    for (const Vertex vertex : subset) {
+      if (!complete_[vertex] && distances_[vertex] >= sub_bound &&
+          distances_[vertex] < subset_bound) {
+        prepend.emplace_back(vertex, distances_[vertex]);
+      }
+    }
+    data_structure.batch_prepend(std::move(prepend));
   }
-  return {current_bound, std::move(result)};
+
+  // Vertices reached within the FindPivots expansion that are already below the
+  // achieved boundary are complete too (Algorithm 3, line 6).
+  for (const Vertex vertex : working_set) {
+    if (!complete_[vertex] && distances_[vertex] < current_bound) {
+      complete_[vertex] = true;
+      result.push_back(vertex);
+    }
+  }
+  return {std::min(current_bound, bound), std::move(result)};
 }
 
 std::pair<double, std::vector<Vertex>>
@@ -213,27 +251,27 @@ SequentialSolver::base_case(const double bound, const std::vector<Vertex>& front
 
   std::priority_queue<QueueEntry, std::vector<QueueEntry>, std::greater<>> queue;
   for (const Vertex start : frontier) {
-    complete_[start] = true;
     if (distances_[start] < bound) {
       queue.emplace(distances_[start], start);
     }
   }
 
-  std::vector<Vertex> result;
-  std::size_t processed_count = 0;
-  const std::size_t limit = std::max<std::size_t>(k_ + frontier.size(), 1'000);
-  while (!queue.empty()) {
+  // Algorithm 2 (BaseCase): a bounded Dijkstra that settles up to k+1 closest
+  // vertices. If it settles at most k, the whole reachable-within-B set fit, so
+  // the boundary stays B; otherwise the boundary tightens to the largest settled
+  // distance and only vertices strictly below it count as complete.
+  std::vector<Vertex> settled;
+  const std::size_t limit = k_ + 1;
+  while (!queue.empty() && settled.size() < limit) {
     const auto [distance, vertex] = queue.top();
     queue.pop();
     if (distance > distances_[vertex]) {
       continue;
     }
-    result.push_back(vertex);
+    complete_[vertex] = true;
+    settled.push_back(vertex);
     if (goal && vertex == *goal) {
-      break;
-    }
-    if (++processed_count > limit) {
-      break;
+      return {bound, std::move(settled)};
     }
     for (const auto& edge : graph_.edges_from(vertex)) {
       const double candidate = distance + edge.weight;
@@ -244,7 +282,26 @@ SequentialSolver::base_case(const double bound, const std::vector<Vertex>& front
       }
     }
   }
-  return {bound, std::move(result)};
+
+  if (settled.size() <= k_) {
+    return {bound, std::move(settled)};
+  }
+  // Boundary tightens: keep only vertices strictly below the largest distance,
+  // marking the rest incomplete so the caller re-queues them.
+  double boundary = 0.0;
+  for (const Vertex vertex : settled) {
+    boundary = std::max(boundary, distances_[vertex]);
+  }
+  std::vector<Vertex> result;
+  result.reserve(settled.size());
+  for (const Vertex vertex : settled) {
+    if (distances_[vertex] < boundary) {
+      result.push_back(vertex);
+    } else {
+      complete_[vertex] = false;
+    }
+  }
+  return {boundary, std::move(result)};
 }
 
 std::pair<std::vector<Vertex>, std::vector<Vertex>>
@@ -295,28 +352,6 @@ SequentialSolver::find_pivots(const double bound, const std::vector<Vertex>& fro
     pivots = frontier;
   }
   return {std::move(pivots), {working_set.begin(), working_set.end()}};
-}
-
-void SequentialSolver::relax_completed(const std::vector<Vertex>& completed_vertices,
-                                       const double lower_bound, const double upper_bound,
-                                       detail::BlockQueue& data_structure) {
-  std::vector<std::pair<Vertex, double>> prepend;
-  for (const Vertex vertex : completed_vertices) {
-    complete_[vertex] = true;
-    for (const auto& edge : graph_.edges_from(vertex)) {
-      const double candidate = distances_[vertex] + edge.weight;
-      if (candidate < distances_[edge.to]) {
-        distances_[edge.to] = candidate;
-        predecessors_[edge.to] = vertex;
-        if (candidate >= lower_bound && candidate < upper_bound) {
-          data_structure.insert(edge.to, candidate);
-        } else if (candidate < lower_bound) {
-          prepend.emplace_back(edge.to, candidate);
-        }
-      }
-    }
-  }
-  data_structure.batch_prepend(std::move(prepend));
 }
 
 std::vector<Vertex> SequentialSolver::reconstruct_path(const Vertex source,
