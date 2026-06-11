@@ -173,14 +173,17 @@ jobs:
           with open("coverage/summary.json") as f:
               data = json.load(f)
 
-          def badge(pct):
-              if pct >= 90: return "🟢"
-              if pct >= 75: return "🟡"
+          def pct(val):
+              return float(val) if val is not None else 0.0
+
+          def badge(p):
+              if p >= 90: return "🟢"
+              if p >= 75: return "🟡"
               return "🔴"
 
-          lp = data.get("line_percent", 0)
-          bp = data.get("branch_percent", 0)
-          fp = data.get("function_percent", 0)
+          lp = pct(data.get("line_percent"))
+          bp = pct(data.get("branch_percent"))
+          fp = pct(data.get("function_percent"))
 
           md = f"""\
           ## Code Coverage
@@ -201,9 +204,9 @@ jobs:
 
           for entry in sorted(data.get("files", []), key=lambda x: x.get("filename", "")):
               name = entry.get("filename", "")
-              flp = entry.get("line_percent", 0)
-              fbp = entry.get("branch_percent", 0)
-              ffp = entry.get("function_percent", 0)
+              flp = pct(entry.get("line_percent"))
+              fbp = pct(entry.get("branch_percent"))
+              ffp = pct(entry.get("function_percent"))
               md += f"| `{name}` | {flp:.1f}% | {fbp:.1f}% | {ffp:.1f}% |\n"
 
           md += "\n</details>\n"
