@@ -1,0 +1,203 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [develop, main]
+  push:
+    branches: [develop]
+    tags: ["v*"]
+
+# Workflow-level: read-only by default.
+# actions: write is required for cancel-in-progress to cancel sibling runs.
+# The release job overrides contents to write.
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  ARTIFACT_RETENTION_DAYS: "7"
+
+jobs:
+  # -----------------------------------------------------------------------
+  # Build in Release mode and run the full CTest suite.
+  # On tag pushes, also packages and uploads the CLI binaries as an artifact
+  # so the release job can pick them up without rebuilding.
+  # -----------------------------------------------------------------------
+  build:
+    name: Build & Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends cmake ninja-build g++
+
+      - name: Configure
+        run: cmake --preset release
+
+      - name: Build
+        run: cmake --build --preset release -j$(nproc)
+
+      - name: Test
+        run: ctest --preset release --output-on-failure
+
+      - name: Compute SHA-256 checksums
+        if: startsWith(github.ref, 'refs/tags/v')
+        working-directory: build/release/test
+        run: |
+          set -euo pipefail
+          sha256sum sssp_compare sssp_benchmark sssp_batch_results sssp_scaling > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Upload release binaries
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: bmssp-linux-x64
+          path: |
+            build/release/test/sssp_compare
+            build/release/test/sssp_benchmark
+            build/release/test/sssp_batch_results
+            build/release/test/sssp_scaling
+            build/release/test/SHA256SUMS
+          if-no-files-found: error
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
+
+  # -----------------------------------------------------------------------
+  # Build in Debug mode with AddressSanitizer + UndefinedBehaviorSanitizer
+  # and run the full test suite. OMP_NUM_THREADS=2 is set by the ctest preset.
+  # -----------------------------------------------------------------------
+  sanitizers:
+    name: Test (AddressSanitizer + UBSan)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends cmake ninja-build g++
+
+      - name: Configure
+        run: cmake --preset sanitizers
+
+      - name: Build
+        run: cmake --build --preset sanitizers -j$(nproc)
+
+      - name: Test
+        run: ctest --preset sanitizers --output-on-failure
+
+  # -----------------------------------------------------------------------
+  # Build with coverage instrumentation (--coverage / gcov), run tests,
+  # then produce an HTML + Cobertura XML report via gcovr filtered to src/.
+  # The HTML artifact can be downloaded and opened in a browser locally.
+  # -----------------------------------------------------------------------
+  coverage:
+    name: Coverage (gcovr)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends cmake ninja-build g++ gcovr
+
+      - name: Configure
+        run: cmake --preset tests
+
+      - name: Build
+        run: cmake --build --preset tests -j$(nproc)
+
+      - name: Test
+        run: ctest --preset tests --output-on-failure
+
+      - name: Generate coverage report
+        run: |
+          set -euo pipefail
+          mkdir -p coverage
+          gcovr \
+            --root . \
+            --filter 'src/' \
+            --exclude-unreachable-branches \
+            --exclude-throw-branches \
+            --html-details coverage/index.html \
+            --xml coverage/coverage.xml \
+            --print-summary \
+            build/tests
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+          retention-days: 30
+
+  # -----------------------------------------------------------------------
+  # Creates a GitHub Release from the binaries built (and already tested)
+  # by the build job. Only runs on tag pushes; requires all other jobs to
+  # pass first.
+  # -----------------------------------------------------------------------
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, sanitizers, coverage]
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: bmssp-linux-x64
+          path: artifacts/
+
+      - name: Make binaries executable
+        run: chmod +x artifacts/sssp_compare artifacts/sssp_benchmark artifacts/sssp_batch_results artifacts/sssp_scaling
+
+      - name: Verify SHA-256 checksums
+        working-directory: artifacts
+        run: sha256sum -c SHA256SUMS
+
+      - name: Rename binaries with platform suffix
+        run: |
+          set -euo pipefail
+          cd artifacts
+          mv sssp_compare       sssp_compare-linux-x64
+          mv sssp_benchmark     sssp_benchmark-linux-x64
+          mv sssp_batch_results sssp_batch_results-linux-x64
+          mv sssp_scaling       sssp_scaling-linux-x64
+          sha256sum \
+            sssp_compare-linux-x64 \
+            sssp_benchmark-linux-x64 \
+            sssp_batch_results-linux-x64 \
+            sssp_scaling-linux-x64 > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "${{ github.ref_name }}" \
+            --repo "${{ github.repository }}" \
+            --title "Release ${{ github.ref_name }}" \
+            --generate-notes \
+            artifacts/sssp_compare-linux-x64 \
+            artifacts/sssp_benchmark-linux-x64 \
+            artifacts/sssp_batch_results-linux-x64 \
+            artifacts/sssp_scaling-linux-x64 \
+            artifacts/SHA256SUMS
