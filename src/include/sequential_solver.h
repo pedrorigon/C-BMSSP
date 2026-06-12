@@ -41,12 +41,11 @@ protected:
   void reset();
   void validate_query(Vertex source, Vertex goal) const;
   [[nodiscard]] PathResult solve_small_graph(Vertex source, Vertex goal);
-  void complete_shortest_paths(std::optional<Vertex> goal);
+  virtual void complete_shortest_paths(std::optional<Vertex> goal);
   [[nodiscard]] PathResult solve_optimized(Vertex source, Vertex goal);
-  [[nodiscard]] std::pair<double, std::vector<Vertex>> bounded_search(std::size_t level,
-                                                                      double bound,
-                                                                      std::vector<Vertex> pivots,
-                                                                      std::optional<Vertex> goal);
+  [[nodiscard]] virtual std::pair<double, std::vector<Vertex>>
+  bounded_search(std::size_t level, double bound, std::vector<Vertex> pivots,
+                 std::optional<Vertex> goal);
   [[nodiscard]] std::pair<double, std::vector<Vertex>>
   base_case(double bound, const std::vector<Vertex>& frontier, std::optional<Vertex> goal);
   [[nodiscard]] virtual std::pair<std::vector<Vertex>, std::vector<Vertex>>
