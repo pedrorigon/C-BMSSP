@@ -28,19 +28,21 @@ bool selected(const std::string_view requested, const std::string_view value) {
 
 template <typename Solver>
 void run_solver(const std::string_view model, const std::string_view type, Solver& solver,
-                const sssp::Vertex source, const sssp::Vertex goal, const std::size_t step) {
-  // Measure a point-to-point query (source to goal, stopping once the goal is
-  // settled), matching the reference bmssp-python benchmark methodology.
+                const sssp::Vertex source, const std::size_t step) {
+  // Measure full single-source shortest paths (source to all vertices). This
+  // aligns the benchmark with the BMSSP vs Dijkstra complexity comparison.
   const auto start = Clock::now();
-  const sssp::PathResult result = solver.solve(source, goal);
+  const std::vector<double> distances = solver.solve_all(source);
   const double elapsed_ms = std::chrono::duration<double, std::milli>(Clock::now() - start).count();
+  const auto reachable =
+      static_cast<std::size_t>(std::count_if(distances.begin(), distances.end(),
+                                             [](const double distance) {
+                                               return distance != sssp::infinity;
+                                             }));
 
-  std::cout << "RESULT|" << step << '|' << model << '|' << type << '|'
-            << (result.reachable() ? "reachable" : "unreachable") << '|';
-  if (result.reachable()) {
-    std::cout << result.distance;
-  }
-  std::cout << '|' << result.path.size() << '|' << elapsed_ms << '\n' << std::flush;
+  std::cout << "RESULT|" << step << '|' << model << '|' << type << '|' << reachable << '|'
+            << elapsed_ms << '\n'
+            << std::flush;
 }
 
 std::pair<std::size_t, std::size_t> parse_size(const std::string_view value) {
@@ -59,7 +61,6 @@ std::pair<std::size_t, std::size_t> parse_size(const std::string_view value) {
 struct BenchmarkGraph {
   sssp::Graph graph;
   sssp::Vertex source;
-  sssp::Vertex goal;
 };
 
 BenchmarkGraph make_bfs_graph(const sssp::Graph& source_graph, const sssp::Vertex source,
@@ -76,7 +77,6 @@ BenchmarkGraph make_bfs_graph(const sssp::Graph& source_graph, const sssp::Verte
   mapping[source] = 0;
   queue.push(source);
   std::size_t mapped_vertices = 1;
-  sssp::Vertex goal = 0;
   while (!queue.empty() && (mapped_vertices < vertex_limit || edges.size() < edge_limit)) {
     const sssp::Vertex original_from = queue.front();
     queue.pop();
@@ -85,7 +85,6 @@ BenchmarkGraph make_bfs_graph(const sssp::Graph& source_graph, const sssp::Verte
       const bool can_discover = mapping[edge.to] == unmapped && mapped_vertices < vertex_limit;
       if (can_discover) {
         mapping[edge.to] = mapped_vertices++;
-        goal = mapping[edge.to];
         queue.push(edge.to);
       }
 
@@ -103,41 +102,40 @@ BenchmarkGraph make_bfs_graph(const sssp::Graph& source_graph, const sssp::Verte
     }
   }
 
-  if (mapped_vertices < 2 || goal == 0) {
-    throw std::invalid_argument("dataset source has no reachable vertex pair");
+  if (mapped_vertices < 2) {
+    throw std::invalid_argument("dataset source has no reachable sample");
   }
 
   sssp::Graph graph(mapped_vertices);
   for (const auto& [from, to, weight] : edges) {
     graph.add_edge(from, to, weight);
   }
-  return {std::move(graph), 0, goal};
+  return {std::move(graph), 0};
 }
 
 void run_graph(const sssp::Graph& graph, const std::size_t step,
                const std::size_t requested_vertices, const std::size_t requested_edges,
-               const sssp::Vertex source, const sssp::Vertex goal, const std::string_view model,
+               const sssp::Vertex source, const std::string_view model,
                const std::string_view type) {
   std::cout << "GRAPH|" << step << '|' << requested_vertices << '|' << requested_edges << '|'
-            << graph.vertex_count() << '|' << graph.edge_count() << '|' << source << '|' << goal
-            << '\n'
+            << graph.vertex_count() << '|' << graph.edge_count() << '|' << source << '\n'
             << std::flush;
 
   if (selected(model, "bmssp") && selected(type, "sequential")) {
     sssp::SequentialSolver solver(graph);
-    run_solver("bmssp", "sequential", solver, source, goal, step);
+    run_solver("bmssp", "sequential", solver, source, step);
   }
   if (selected(model, "bmssp") && selected(type, "parallel")) {
     sssp::ParallelSolver solver(graph);
-    run_solver("bmssp", "parallel", solver, source, goal, step);
+    run_solver("bmssp", "parallel", solver, source, step);
   }
   if (selected(model, "dijkstra") && selected(type, "sequential")) {
     validation::DijkstraSolver solver(graph);
-    run_solver("dijkstra", "sequential", solver, source, goal, step);
+    run_solver("dijkstra", "sequential", solver, source, step);
   }
   if (selected(model, "dijkstra") && selected(type, "parallel")) {
     validation::ParallelDijkstraSolver solver(graph);
-    run_solver("dijkstra", "parallel", solver, source, goal, step);
+    run_solver("dijkstra", "parallel", solver, source, step);
   }
 }
 
@@ -153,17 +151,16 @@ void validate_selection(const std::string_view model, const std::string_view typ
 } // namespace
 
 int main(const int argc, const char* argv[]) {
-  if (argc < 6) {
-    std::cerr << "usage: sssp_benchmark <snap-file> <source-id> <goal-id> "
+  if (argc < 5) {
+    std::cerr << "usage: sssp_benchmark <snap-file> <source-id> "
                  "<all|bmssp|dijkstra> <all|sequential|parallel> [<vertices>:<edges> ...]\n";
     return EXIT_FAILURE;
   }
 
   try {
     const auto source = static_cast<sssp::Vertex>(std::stoull(argv[2]));
-    const auto goal = static_cast<sssp::Vertex>(std::stoull(argv[3]));
-    const std::string_view model = argv[4];
-    const std::string_view type = argv[5];
+    const std::string_view model = argv[3];
+    const std::string_view type = argv[4];
     validate_selection(model, type);
 
     const auto load_start = Clock::now();
@@ -175,15 +172,15 @@ int main(const int argc, const char* argv[]) {
               << std::flush;
 
     std::size_t step = 0;
-    for (int index = 6; index < argc; ++index) {
+    for (int index = 5; index < argc; ++index) {
       const auto [vertices, edges] = parse_size(argv[index]);
       if (vertices >= graph.vertex_count() && edges >= graph.edge_count()) {
         continue;
       }
       BenchmarkGraph sample = make_bfs_graph(graph, source, vertices, edges);
-      run_graph(sample.graph, step++, vertices, edges, sample.source, sample.goal, model, type);
+      run_graph(sample.graph, step++, vertices, edges, sample.source, model, type);
     }
-    run_graph(graph, step, graph.vertex_count(), graph.edge_count(), source, goal, model, type);
+    run_graph(graph, step, graph.vertex_count(), graph.edge_count(), source, model, type);
   } catch (const std::exception& error) {
     std::cerr << "error: " << error.what() << '\n';
     return EXIT_FAILURE;

@@ -4,6 +4,7 @@
 #include "path_result.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <vector>
 
@@ -34,6 +35,9 @@ protected:
   std::vector<double> distances_;
   std::vector<Vertex> predecessors_;
   std::vector<bool> complete_;
+  std::vector<std::uint32_t> pivot_marks_;
+  std::vector<std::size_t> pivot_subtree_sizes_;
+  std::uint32_t pivot_mark_{0};
   std::size_t k_;
   std::size_t t_;
   SolverOptions options_;
