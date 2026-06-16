@@ -4,11 +4,8 @@
 
 #include <algorithm>
 #include <cmath>
-#include <functional>
-#include <queue>
+#include <limits>
 #include <stdexcept>
-#include <unordered_map>
-#include <unordered_set>
 
 namespace sssp {
 
@@ -18,12 +15,98 @@ using QueueEntry = std::pair<double, Vertex>;
 std::size_t capped_power_of_two(const std::size_t exponent) {
   return std::size_t{1} << std::min<std::size_t>(exponent, 20);
 }
+
+class IndexedMinHeap {
+public:
+  explicit IndexedMinHeap(const std::size_t vertex_count)
+      : positions_(vertex_count, missing_position) {
+    heap_.reserve(vertex_count);
+  }
+
+  [[nodiscard]] bool empty() const noexcept { return heap_.empty(); }
+
+  void push_or_decrease(const Vertex vertex, const double distance) {
+    std::size_t position = positions_[vertex];
+    if (position == missing_position) {
+      position = heap_.size();
+      heap_.push_back({distance, vertex});
+      positions_[vertex] = position;
+      sift_up(position);
+      return;
+    }
+    if (distance >= heap_[position].first) {
+      return;
+    }
+    heap_[position].first = distance;
+    sift_up(position);
+  }
+
+  QueueEntry pop_min() {
+    const QueueEntry minimum = heap_.front();
+    positions_[minimum.second] = missing_position;
+    if (heap_.size() == 1) {
+      heap_.pop_back();
+      return minimum;
+    }
+
+    heap_.front() = heap_.back();
+    positions_[heap_.front().second] = 0;
+    heap_.pop_back();
+    sift_down(0);
+    return minimum;
+  }
+
+private:
+  static constexpr std::size_t missing_position = std::numeric_limits<std::size_t>::max();
+
+  void swap_entries(const std::size_t left, const std::size_t right) {
+    std::swap(heap_[left], heap_[right]);
+    positions_[heap_[left].second] = left;
+    positions_[heap_[right].second] = right;
+  }
+
+  void sift_up(std::size_t position) {
+    while (position > 0) {
+      const std::size_t parent = (position - 1) / 4;
+      if (heap_[parent].first <= heap_[position].first) {
+        break;
+      }
+      swap_entries(parent, position);
+      position = parent;
+    }
+  }
+
+  void sift_down(std::size_t position) {
+    while (true) {
+      const std::size_t first_child = position * 4 + 1;
+      if (first_child >= heap_.size()) {
+        break;
+      }
+      std::size_t smallest = first_child;
+      const std::size_t child_limit = std::min(first_child + 4, heap_.size());
+      for (std::size_t child = first_child + 1; child < child_limit; ++child) {
+        if (heap_[child].first < heap_[smallest].first) {
+          smallest = child;
+        }
+      }
+      if (heap_[position].first <= heap_[smallest].first) {
+        break;
+      }
+      swap_entries(position, smallest);
+      position = smallest;
+    }
+  }
+
+  std::vector<QueueEntry> heap_;
+  std::vector<std::size_t> positions_;
+};
 } // namespace
 
 SequentialSolver::SequentialSolver(const Graph& graph, const SolverOptions options)
     : graph_(graph), distances_(graph.vertex_count(), infinity),
       predecessors_(graph.vertex_count(), graph.vertex_count()),
-      complete_(graph.vertex_count(), false), options_(options) {
+      complete_(graph.vertex_count(), false), pivot_marks_(graph.vertex_count(), 0),
+      pivot_subtree_sizes_(graph.vertex_count(), 0), options_(options) {
   const double log_n =
       graph.vertex_count() > 1 ? std::log(static_cast<double>(graph.vertex_count())) : 0.0;
   k_ = std::max<std::size_t>(3, static_cast<std::size_t>(std::floor(std::cbrt(log_n) * 2.0)));
@@ -50,11 +133,10 @@ std::vector<double> SequentialSolver::solve_all(const Vertex source) {
       graph_.edge_count() < options_.minimum_optimized_edges) {
     reset();
     distances_[source] = 0.0;
-    std::priority_queue<QueueEntry, std::vector<QueueEntry>, std::greater<>> queue;
-    queue.emplace(0.0, source);
+    IndexedMinHeap queue(graph_.vertex_count());
+    queue.push_or_decrease(source, 0.0);
     while (!queue.empty()) {
-      const auto [distance, vertex] = queue.top();
-      queue.pop();
+      const auto [distance, vertex] = queue.pop_min();
       if (distance > distances_[vertex]) {
         continue;
       }
@@ -63,7 +145,7 @@ std::vector<double> SequentialSolver::solve_all(const Vertex source) {
         if (candidate < distances_[edge.to]) {
           distances_[edge.to] = candidate;
           predecessors_[edge.to] = vertex;
-          queue.emplace(candidate, edge.to);
+          queue.push_or_decrease(edge.to, candidate);
         }
       }
     }
@@ -93,13 +175,12 @@ void SequentialSolver::validate_query(const Vertex source, const Vertex goal) co
 
 PathResult SequentialSolver::solve_small_graph(const Vertex source, const Vertex goal) {
   reset();
-  std::priority_queue<QueueEntry, std::vector<QueueEntry>, std::greater<>> queue;
+  IndexedMinHeap queue(graph_.vertex_count());
   distances_[source] = 0.0;
-  queue.emplace(0.0, source);
+  queue.push_or_decrease(source, 0.0);
 
   while (!queue.empty()) {
-    const auto [distance, vertex] = queue.top();
-    queue.pop();
+    const auto [distance, vertex] = queue.pop_min();
     if (distance > distances_[vertex]) {
       continue;
     }
@@ -111,7 +192,7 @@ PathResult SequentialSolver::solve_small_graph(const Vertex source, const Vertex
       if (candidate < distances_[edge.to]) {
         distances_[edge.to] = candidate;
         predecessors_[edge.to] = vertex;
-        queue.emplace(candidate, edge.to);
+        queue.push_or_decrease(edge.to, candidate);
       }
     }
   }
@@ -119,17 +200,16 @@ PathResult SequentialSolver::solve_small_graph(const Vertex source, const Vertex
 }
 
 void SequentialSolver::complete_shortest_paths(const std::optional<Vertex> goal) {
-  std::priority_queue<QueueEntry, std::vector<QueueEntry>, std::greater<>> queue;
+  IndexedMinHeap queue(graph_.vertex_count());
   for (Vertex vertex = 0; vertex < graph_.vertex_count(); ++vertex) {
     if (distances_[vertex] != infinity) {
-      queue.emplace(distances_[vertex], vertex);
+      queue.push_or_decrease(vertex, distances_[vertex]);
     }
   }
 
   std::fill(complete_.begin(), complete_.end(), false);
   while (!queue.empty()) {
-    const auto [distance, vertex] = queue.top();
-    queue.pop();
+    const auto [distance, vertex] = queue.pop_min();
     if (complete_[vertex] || distance > distances_[vertex]) {
       continue;
     }
@@ -142,7 +222,7 @@ void SequentialSolver::complete_shortest_paths(const std::optional<Vertex> goal)
       if (candidate < distances_[edge.to]) {
         distances_[edge.to] = candidate;
         predecessors_[edge.to] = vertex;
-        queue.emplace(candidate, edge.to);
+        queue.push_or_decrease(edge.to, candidate);
       }
     }
   }
@@ -154,6 +234,11 @@ PathResult SequentialSolver::solve_optimized(const Vertex source, const Vertex g
   const auto max_level = static_cast<std::size_t>(
       std::ceil(std::log(static_cast<double>(graph_.vertex_count())) / static_cast<double>(t_)));
   static_cast<void>(bounded_search(max_level, infinity, {source}, goal));
+  if (complete_[goal]) {
+    return distances_[goal] == infinity
+               ? PathResult{}
+               : PathResult{distances_[goal], reconstruct_path(source, goal)};
+  }
   complete_shortest_paths(goal);
   return distances_[goal] == infinity
              ? PathResult{}
@@ -249,10 +334,10 @@ SequentialSolver::base_case(const double bound, const std::vector<Vertex>& front
     return {bound, {}};
   }
 
-  std::priority_queue<QueueEntry, std::vector<QueueEntry>, std::greater<>> queue;
+  IndexedMinHeap queue(graph_.vertex_count());
   for (const Vertex start : frontier) {
     if (distances_[start] < bound) {
-      queue.emplace(distances_[start], start);
+      queue.push_or_decrease(start, distances_[start]);
     }
   }
 
@@ -263,8 +348,7 @@ SequentialSolver::base_case(const double bound, const std::vector<Vertex>& front
   std::vector<Vertex> settled;
   const std::size_t limit = k_ + 1;
   while (!queue.empty() && settled.size() < limit) {
-    const auto [distance, vertex] = queue.top();
-    queue.pop();
+    const auto [distance, vertex] = queue.pop_min();
     if (distance > distances_[vertex]) {
       continue;
     }
@@ -278,7 +362,7 @@ SequentialSolver::base_case(const double bound, const std::vector<Vertex>& front
       if (candidate < distances_[edge.to] && candidate < bound) {
         distances_[edge.to] = candidate;
         predecessors_[edge.to] = vertex;
-        queue.emplace(candidate, edge.to);
+        queue.push_or_decrease(edge.to, candidate);
       }
     }
   }
@@ -306,12 +390,24 @@ SequentialSolver::base_case(const double bound, const std::vector<Vertex>& front
 
 std::pair<std::vector<Vertex>, std::vector<Vertex>>
 SequentialSolver::find_pivots(const double bound, const std::vector<Vertex>& frontier) {
-  std::unordered_set<Vertex> working_set(frontier.begin(), frontier.end());
-  working_set.reserve(k_ * frontier.size());
+  if (pivot_mark_ == std::numeric_limits<std::uint32_t>::max()) {
+    std::fill(pivot_marks_.begin(), pivot_marks_.end(), 0);
+    pivot_mark_ = 0;
+  }
+  ++pivot_mark_;
+
+  std::vector<Vertex> working_set;
+  working_set.reserve(std::min(graph_.vertex_count(), frontier.size() * (k_ + 1)));
+  for (const Vertex vertex : frontier) {
+    if (pivot_marks_[vertex] != pivot_mark_) {
+      pivot_marks_[vertex] = pivot_mark_;
+      working_set.push_back(vertex);
+    }
+  }
   std::vector<Vertex> current_layer = frontier;
 
   for (std::size_t iteration = 0; iteration < k_; ++iteration) {
-    std::unordered_set<Vertex> next_layer;
+    std::vector<Vertex> next_layer;
     next_layer.reserve(current_layer.size() * 2);
     for (const Vertex vertex : current_layer) {
       for (const auto& edge : graph_.edges_from(vertex)) {
@@ -319,8 +415,10 @@ SequentialSolver::find_pivots(const double bound, const std::vector<Vertex>& fro
         if (candidate < distances_[edge.to] && candidate < bound) {
           distances_[edge.to] = candidate;
           predecessors_[edge.to] = vertex;
-          if (working_set.insert(edge.to).second) {
-            next_layer.insert(edge.to);
+          if (pivot_marks_[edge.to] != pivot_mark_) {
+            pivot_marks_[edge.to] = pivot_mark_;
+            working_set.push_back(edge.to);
+            next_layer.push_back(edge.to);
           }
         }
       }
@@ -328,30 +426,36 @@ SequentialSolver::find_pivots(const double bound, const std::vector<Vertex>& fro
     if (next_layer.empty()) {
       break;
     }
-    current_layer.assign(next_layer.begin(), next_layer.end());
+    current_layer = std::move(next_layer);
     if (working_set.size() > k_ * frontier.size()) {
-      return {frontier, {working_set.begin(), working_set.end()}};
+      return {frontier, std::move(working_set)};
     }
   }
 
-  std::unordered_map<Vertex, std::size_t> subtree_sizes;
+  std::vector<Vertex> touched_predecessors;
   for (const Vertex vertex : working_set) {
     const Vertex predecessor = predecessors_[vertex];
     if (predecessor != graph_.vertex_count()) {
-      ++subtree_sizes[predecessor];
+      if (pivot_subtree_sizes_[predecessor] == 0) {
+        touched_predecessors.push_back(predecessor);
+      }
+      ++pivot_subtree_sizes_[predecessor];
     }
   }
 
   std::vector<Vertex> pivots;
   for (const Vertex vertex : frontier) {
-    if (subtree_sizes[vertex] >= k_) {
+    if (pivot_subtree_sizes_[vertex] >= k_) {
       pivots.push_back(vertex);
     }
+  }
+  for (const Vertex vertex : touched_predecessors) {
+    pivot_subtree_sizes_[vertex] = 0;
   }
   if (pivots.empty()) {
     pivots = frontier;
   }
-  return {std::move(pivots), {working_set.begin(), working_set.end()}};
+  return {std::move(pivots), std::move(working_set)};
 }
 
 std::vector<Vertex> SequentialSolver::reconstruct_path(const Vertex source,

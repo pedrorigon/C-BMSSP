@@ -6,6 +6,8 @@ sizes and measures full single-source shortest paths (source to every vertex)
 for the C++ BMSSP and Dijkstra solvers. This synthetic workload scales far
 beyond the SNAP datasets and is meant to expose the BMSSP asymptotic advantage
 (``O(m log^(2/3) n)``) over Dijkstra (``O(m + n log n)``) as the graph grows.
+Use ``--type sequential`` when you want only the direct
+``SequentialSolver::solve_all`` vs ``DijkstraSolver::solve_all`` comparison.
 
 Each size is run ``--iterations`` times (default 10); times are aggregated with
 1.5x IQR outlier removal and a 95% t-Student confidence interval. Results are
@@ -73,13 +75,17 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--model",
-        choices=("bmssp", "dijkstra"),
+        choices=("all", "bmssp", "dijkstra"),
         help="Run only the selected model. By default, both models are run.",
     )
     parser.add_argument(
         "--type",
-        choices=("sequential", "parallel"),
-        help="Run only the selected implementation type. By default, both types are run.",
+        choices=("all", "sequential", "parallel"),
+        help=(
+            "Run only the selected implementation type. By default, all types are run. "
+            "Use --type sequential for the direct SequentialSolver::solve_all vs "
+            "DijkstraSolver::solve_all comparison."
+        ),
     )
     parser.add_argument(
         "--iterations",
@@ -309,6 +315,7 @@ def main() -> int:
 
     console.title("C-BMSSP Scalability Benchmark (generated graphs)")
     console.detail(f"Model: {model} | Type: {implementation_type}")
+    console.detail("Workload: full single-source shortest paths via solve_all(source)")
     console.detail(
         f"Topology: {args.topology} | Avg degree: {args.avg_degree} | "
         f"Bandwidth: {args.bandwidth} | Seed: {args.seed} | Iterations: {args.iterations}"
