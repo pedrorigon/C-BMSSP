@@ -2,12 +2,12 @@
 """Benchmark the C++ BMSSP and Dijkstra solvers on full SNAP datasets.
 
 Downloads the Stanford, Google, Pokec, and LiveJournal SNAP datasets as needed
-(already-downloaded files are reused, never re-downloaded) and measures a single
-point-to-point query (source to goal) on the complete graph, matching the
-reference bmssp-python benchmark. Each measurement is repeated ``--iterations``
-times (default 10) and aggregated with 1.5x IQR outlier removal and a 95%
-t-Student confidence interval. Results are printed as a table and written to a
-CSV under ``output/``.
+(already-downloaded files are reused, never re-downloaded) and measures full
+single-source shortest paths (source to every vertex). This keeps the comparison
+aligned with the BMSSP vs Dijkstra theoretical complexity result. Each
+measurement is repeated ``--iterations`` times (default 10) and aggregated with
+1.5x IQR outlier removal and a 95% t-Student confidence interval. Results are
+printed as a table and written to a CSV under ``output/``.
 
 For a scalability study that varies the graph size, see ``run_scaling.py``.
 """
@@ -40,25 +40,21 @@ DATASETS = {
         "url": "https://snap.stanford.edu/data/web-Stanford.txt.gz",
         "filename": "web-Stanford.txt",
         "source": 235899,
-        "goal": 23074,
     },
     "google": {
         "url": "https://snap.stanford.edu/data/web-Google.txt.gz",
         "filename": "web-Google.txt",
         "source": 895428,
-        "goal": 228498,
     },
     "pokec": {
         "url": "https://snap.stanford.edu/data/soc-pokec-relationships.txt.gz",
         "filename": "soc-pokec-relationships.txt",
         "source": 1452585,
-        "goal": 1618281,
     },
     "livejournal": {
         "url": "https://snap.stanford.edu/data/soc-LiveJournal1.txt.gz",
         "filename": "soc-LiveJournal1.txt",
         "source": 1469803,
-        "goal": 4835730,
     },
 }
 
@@ -67,9 +63,7 @@ CSV_FIELDS = [
     "dataset",
     "model",
     "type",
-    "status",
-    "distance",
-    "path_vertices",
+    "reachable",
     "iterations",
     "samples_used",
     "outliers_removed",
@@ -83,7 +77,6 @@ CSV_FIELDS = [
     "dataset_edges",
     "load_time_seconds",
     "source",
-    "goal",
 ]
 
 
@@ -98,13 +91,17 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--model",
-        choices=("bmssp", "dijkstra"),
+        choices=("all", "bmssp", "dijkstra"),
         help="Run only the selected model. By default, both models are run.",
     )
     parser.add_argument(
         "--type",
-        choices=("sequential", "parallel"),
-        help="Run only the selected implementation type. By default, both types are run.",
+        choices=("all", "sequential", "parallel"),
+        help=(
+            "Run only the selected implementation type. By default, all types are run. "
+            "Use --type sequential for the direct SequentialSolver::solve_all vs "
+            "DijkstraSolver::solve_all comparison."
+        ),
     )
     parser.add_argument(
         "--iterations",
@@ -204,14 +201,12 @@ def run_benchmark_once(
                 "dataset_edges": int(parts[2]),
                 "load_time_seconds": float(parts[3]) / 1000.0,
             }
-        elif parts[0] == "RESULT" and len(parts) == 8:
+        elif parts[0] == "RESULT" and len(parts) == 6:
             results[(parts[2], parts[3])] = {
                 "model": parts[2],
                 "type": parts[3],
-                "status": parts[4],
-                "distance": parts[5],
-                "path_vertices": int(parts[6]),
-                "time_seconds": float(parts[7]) / 1000.0,
+                "reachable": int(parts[4]),
+                "time_seconds": float(parts[5]) / 1000.0,
             }
         elif line:
             messages.append(line)
@@ -231,18 +226,15 @@ def run_dataset(
     console: Console,
 ) -> list[dict[str, Any]]:
     info = DATASETS[dataset]
-    # No size arguments: the benchmark CLI then times only the complete graph.
+    # No size arguments: the benchmark CLI then times solve_all on the complete graph.
     command = [
         str(BENCHMARK_EXECUTABLE),
         str(path),
         str(info["source"]),
-        str(info["goal"]),
         model,
         implementation_type,
     ]
-    console.detail(
-        f"Source={info['source']} Goal={info['goal']} Model={model} Type={implementation_type}"
-    )
+    console.detail(f"Source={info['source']} Model={model} Type={implementation_type}")
     console.detail(f"Iterations per benchmark: {iterations}")
 
     dataset_info: dict[str, Any] = {}
@@ -272,14 +264,11 @@ def run_dataset(
             "dataset": dataset,
             "model": identity["model"],
             "type": identity["type"],
-            "status": identity["status"],
-            "distance": identity["distance"],
-            "path_vertices": identity["path_vertices"],
+            "reachable": identity["reachable"],
             "iterations": iterations,
             **summarize_samples(samples[key]),
             **dataset_info,
             "source": info["source"],
-            "goal": info["goal"],
         }
         results.append(result)
         spread = (
@@ -287,16 +276,10 @@ def run_dataset(
             f" n={result['samples_used']}/{result['iterations']}"
         )
         label = f"{identity['model']} / {identity['type']}"
-        if identity["status"] == "reachable":
-            console.success(
-                f"{label:<24} distance={identity['distance']}  "
-                f"path_vertices={identity['path_vertices']}  "
-                f"mean={result['mean_time_seconds']:.6f}s  95%CI={spread}"
-            )
-        else:
-            console.success(
-                f"{label:<24} unreachable  mean={result['mean_time_seconds']:.6f}s  95%CI={spread}"
-            )
+        console.success(
+            f"{label:<24} reachable={identity['reachable']:,}  "
+            f"mean={result['mean_time_seconds']:.6f}s  95%CI={spread}"
+        )
     return results
 
 
@@ -328,6 +311,7 @@ def main() -> int:
     console.title("C-BMSSP Dataset Benchmark")
     console.detail(f"Datasets: {', '.join(selected_datasets)}")
     console.detail(f"Model: {model} | Type: {implementation_type}")
+    console.detail("Workload: full single-source shortest paths via solve_all(source)")
     console.detail(f"Iterations: {args.iterations}")
 
     try:
