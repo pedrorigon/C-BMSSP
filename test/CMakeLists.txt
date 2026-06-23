@@ -28,6 +28,7 @@ target_compile_definitions(
     PRIVATE SSSP_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data"
 )
 add_sssp_test(block_queue_unit_test unit/block_queue_test.cpp)
+add_sssp_test(constant_degree_graph_unit_test unit/constant_degree_graph_test.cpp)
 add_sssp_test(sequential_solver_unit_test unit/sequential_solver_test.cpp)
 add_sssp_test(parallel_solver_unit_test unit/parallel_solver_test.cpp)
 add_sssp_test(solver_edge_cases_unit_test unit/solver_edge_cases_test.cpp)
@@ -80,11 +81,26 @@ target_link_libraries(
             sssp_project_options sssp_project_warnings
 )
 
+add_executable(sssp_visualization_trace comparison/visualization_cli.cpp)
+target_link_libraries(
+    sssp_visualization_trace
+    PRIVATE sssp::sssp validation::dijkstra
+            sssp_project_options sssp_project_warnings
+)
+
+add_executable(sssp_profile comparison/profile_cli.cpp)
+target_link_libraries(
+    sssp_profile
+    PRIVATE sssp::sssp sssp_test_support validation::dijkstra
+            sssp_project_options sssp_project_warnings
+)
+
 set_tests_properties(
     graph_unit_test
     dimacs_reader_unit_test
     snap_reader_unit_test
     block_queue_unit_test
+    constant_degree_graph_unit_test
     sequential_solver_unit_test
     parallel_solver_unit_test
     solver_edge_cases_unit_test

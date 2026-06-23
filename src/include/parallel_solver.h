@@ -2,36 +2,22 @@
 
 #include "sequential_solver.h"
 
-#include <cstddef>
-#include <utility>
-#include <vector>
-
 namespace sssp {
 
-namespace detail {
-class BlockQueue;
-}
-
+// Work-efficient OpenMP implementation. It shares the paper recursion and
+// partial-order structure with SequentialSolver and parallelizes edge scans in
+// completed BMSSP batches.
 class ParallelSolver final : public SequentialSolver {
 public:
   explicit ParallelSolver(const Graph& graph, SolverOptions options = {});
 
 private:
-  [[nodiscard]] std::pair<std::vector<Vertex>, std::vector<Vertex>>
-  find_pivots(double bound, const std::vector<Vertex>& frontier) override;
+  void relax_completed(const std::vector<Vertex>& completed, detail::QueueKey recursive_bound,
+                       detail::QueueKey pull_bound, detail::QueueKey call_bound,
+                       detail::BlockQueue& data_structure,
+                       std::vector<detail::QueueItem>& prepend) override;
 
-  [[nodiscard]] std::pair<double, std::vector<Vertex>>
-  bounded_search(std::size_t level, double bound, std::vector<Vertex> pivots,
-                 std::optional<Vertex> goal) override;
-
-  void complete_shortest_paths(std::optional<Vertex> goal) override;
-
-  void relax_edges_parallel(const std::vector<Vertex>& completed, double sub_bound,
-                            double subset_bound, double bound,
-                            detail::BlockQueue& data_structure,
-                            std::vector<std::pair<Vertex, double>>& prepend);
-
-  static constexpr std::size_t kParallelRelaxThreshold = 256;
+  static constexpr std::size_t kParallelRelaxThreshold = 512;
 };
 
 } // namespace sssp

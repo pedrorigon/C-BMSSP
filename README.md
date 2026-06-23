@@ -1,7 +1,8 @@
 # C-BMSSP: Bounded Multi-Source Shortest Path
 
-A C++ implementation inspired by *["Breaking the Sorting Barrier for Directed Single-Source Shortest Paths"](https://arxiv.org/abs/2504.17033)* by Ran Duan, Jiayi Mao, Xiao Mao, Xinkai Shu, and
-Longhui Yin (STOC 2025). 
+A C++ implementation of the deterministic BMSSP algorithm from
+*["Breaking the Sorting Barrier for Directed Single-Source Shortest Paths"](https://arxiv.org/abs/2504.17033)*
+by Ran Duan, Jiayi Mao, Xiao Mao, Xinkai Shu, and Longhui Yin (STOC 2025).
 
 The algorithm breaks the `O(m + n log n)` sorting barrier for directed single-source shortest paths (SSSP). It reduces the logarithmic complexity factor to `O(log^(2/3) n)`, yielding an overall time complexity of `O(m log^(2/3) n)` for directed graphs with real,
 non-negative edge weights in the comparison-addition model. This improvement becomes increasingly relevant for large sparse graphs.
@@ -9,7 +10,6 @@ non-negative edge weights in the comparison-addition model. This improvement bec
 ## Algorithm Properties
 
 - **Time Complexity**: `O(m log^(2/3) n)`
-- **Space Complexity**: `O(n + m)`
 - **Recommended use**: Best For Large sparse directed graphs where breaking the sorting barrier matters
 - **Advantages**: First deterministic algorithm to break Dijkstra's
   `O(m + n log n)` complexity barrier, even for undirected graphs
@@ -45,7 +45,7 @@ You are then ready to run the [benchmarks](#dataset-benchmarks) and
 ```text
 src/
   include/                    Public API and internal headers
-  core/                       Core C++ implementation
+  core/                       BMSSP, partial-order queue, and graph transform
 validation/dijkstra/
   src/include/                Validation API
   src/core/                   Sequential and OpenMP Dijkstra implementations
@@ -56,12 +56,15 @@ test/
   data/                       Test datasets
 ```
 
-Validation includes sequential and OpenMP Dijkstra solvers. The parallel solver
-processes equal-distance minimum batches and relaxes edges in parallel, then
-applies updates deterministically. Batches containing zero-weight edges preserve
-the sequential heap order so both Dijkstra solvers return the same distance and
-path. When OpenMP is unavailable, the parallel solver uses the same deterministic
-algorithm without parallel regions.
+The BMSSP implementation includes the paper's constant-degree transformation,
+total path order, `FindPivots`, bounded base case, recursive Algorithm 3, and the
+block structure from Lemma 3.3. The OpenMP variant shares the same recursion and
+parallelizes scans of edges leaving completed batches.
+
+Validation includes sequential heap-based Dijkstra and OpenMP Delta-stepping.
+Updates are applied deterministically so all solvers return the same distance
+and path. When OpenMP is unavailable, parallel targets remain correct without
+parallel regions.
 
 ## Build
 
@@ -150,27 +153,63 @@ same problem, and real weights are required — unit weights reduce SSSP to a BF
 where everything ties. The default `random` topology (moderate density) gives the
 parallel solvers enough work per distance level to scale; `--topology banded`
 builds a large-diameter sparse graph instead. Results go to a CSV under `output/`
-plus linear and log-Y plots (PDF + JPG) under `plots/scaling/`.
+plus several plots (PDF + JPG) under `plots/scaling/`: the wall-clock scaling
+curves (linear and log-Y) and, more importantly, the **empirical-complexity
+plots** described below.
 
 ```bash
-uv run python run_scaling.py                                   # random, up to 10M vertices
+uv run python run_scaling.py                                   # random, degree 4, up to 100M vertices
 uv run python run_scaling.py --max-vertices 1000000 --steps 8  # quicker run
 uv run python run_scaling.py --avg-degree 16                   # denser graph
 uv run python run_scaling.py --topology banded --avg-degree 2  # large-diameter sparse
+uv run python run_scaling.py --memory-limit-gb 32              # raise the per-run RAM cap
 ```
+
+The default is degree 4 (sparse graphs are the fairest regime for BMSSP) and a
+100M-vertex ceiling. Dijkstra reaches that ceiling on the untransformed graph;
+BMSSP is stopped by `--memory-limit-gb` (default 16 GiB) once the constant-degree
+transform no longer fits — around 5M vertices on a 32 GiB machine — so the two
+curves intentionally end at different sizes.
+
+### Proving the complexity (work, not wall-clock)
+
+Wall-clock cannot show the BMSSP advantage: the constant-degree blow-up and its
+larger constant factor make it slower on every in-memory input. The complexity
+claim is about the **number of ordered-structure operations**, so both solvers are
+instrumented (`src/include/work_counter.h`): Dijkstra charges `log n` per heap op,
+BMSSP charges the Lemma 3.3 costs. `run_scaling.py` then emits two extra figures:
+
+- `..._complexity.{jpg,pdf}` — weighted work per edge (raw and normalized to the
+  smallest graph). Dijkstra's normalized work grows like `log n` (~2.0x over
+  1K→1M); BMSSP grows like `log^(2/3) n` (~1.4x). The smaller exponent is visible
+  as the flatter curve.
+- `..._crossover.{jpg,pdf}` — the BMSSP/Dijkstra work ratio, which falls with
+  `ln(n)`, with a dashed extrapolation to the projected work break-even (~10^11
+  vertices, far beyond memory — a projection, not a measurement).
+
+`generate_complexity_gif.py` animates the normalized growth race as a 10-second
+GIF under `visualizations/complexity/`.
 
 ### Interpreting the results
 
-- **Parallel Dijkstra** (Δ-stepping) is ~2–2.5× faster than sequential Dijkstra
-  on the default moderately dense random graphs, and the speedup grows with size.
-  On `banded` graphs the diameter is large and each distance level holds few
-  vertices, so there is little to parallelise and the speedup drops toward 1×.
-- **BMSSP** ties Dijkstra on **full SSSP**. This is structural, not a tuning
-  issue: after its bounded recursion, the solver runs a full Dijkstra
-  `complete_shortest_paths` pass to finalise any vertices the recursion left
-  incomplete, so a full-SSSP BMSSP run is essentially "BMSSP work + a Dijkstra".
-  The BMSSP advantage only materialises on **point-to-point queries with early
-  exit** (as in the dataset benchmark), where that final pass stops at the goal.
+- The BMSSP target always runs the paper algorithm; there is no Dijkstra
+  completion pass or graph-size fallback.
+- BMSSP first transforms the input to constant degree. This preserves shortest
+  paths and the asymptotic bound, but it can substantially increase the practical
+  vertex and edge counts.
+- Dijkstra usually has lower constants on current hardware because its hot loop
+  is compact and cache-friendly. BMSSP trades that simplicity for a better
+  asymptotic comparison bound, with recursion, pivot discovery, and partial-order
+  bookkeeping.
+- OpenMP helps only when completed batches are large enough to amortize worker
+  synchronization and the deterministic serial commit.
+
+For a reproducible local micro-profile and the six 10-second visual comparisons:
+
+```bash
+uv run python run_profiling.py
+uv run python generate_visualizations.py
+```
 
 ## References
 

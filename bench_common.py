@@ -46,6 +46,14 @@ SERIES_STYLES = {
     ("dijkstra", "parallel"): {"color": "#ec4899"},
 }
 
+# Portuguese series labels for the complexity figure legend.
+SERIES_LABELS_PT = {
+    ("bmssp", "sequential"): "BMSSP sequencial",
+    ("bmssp", "parallel"): "BMSSP paralelo",
+    ("dijkstra", "sequential"): "Dijkstra sequencial",
+    ("dijkstra", "parallel"): "Dijkstra paralelo",
+}
+
 
 class Console:
     """Small ANSI-aware formatter for readable benchmark progress."""
@@ -227,4 +235,233 @@ def render_scaling_figure(
     plt.close(figure)
     console.success(
         f"Saved scaling plots: {pdf_path.relative_to(root)} and {jpg_path.relative_to(root)}"
+    )
+
+
+def render_complexity_figure(
+    results: list[dict[str, Any]],
+    x_key: str,
+    x_axis_label: str,
+    subtitle: str,
+    pdf_path: Path,
+    jpg_path: Path,
+    root: Path,
+    console: Console,
+) -> None:
+    """Draw the empirical-complexity figure: weighted work per edge vs graph size.
+
+    Wall-clock time cannot show the BMSSP advantage; the constant-degree blow-up
+    and the larger constant factor dominate every in-memory input. The complexity
+    claim is about the *number* of ordered-structure operations the analysis
+    charges (``work_counter.h``). Dividing that work by the edge count gives the
+    work-per-edge, which grows like ``log n`` for Dijkstra and ``log^(2/3) n`` for
+    BMSSP. Two panels are drawn:
+
+    * left: raw work/edge, showing the real shape (BMSSP flattens, Dijkstra does
+      not) while honestly keeping BMSSP's larger constant above Dijkstra;
+    * right: each curve divided by its own first point, so both start at 1.0 and
+      the *growth rate* is compared directly -- Dijkstra climbs above BMSSP,
+      exposing the smaller exponent.
+    """
+    series: dict[tuple[str, str], dict[int, dict[str, Any]]] = defaultdict(dict)
+    sizes: set[int] = set()
+    for result in results:
+        if "work_per_edge" not in result:
+            continue
+        size = int(result[x_key])
+        series[(result["model"], result["type"])][size] = result
+        sizes.add(size)
+    if not series or not sizes:
+        console.detail("No work data points to plot.")
+        return
+
+    ordered_sizes = sorted(sizes)
+    position = {size: index for index, size in enumerate(ordered_sizes)}
+
+    plt.style.use("default")
+    figure, (axis_raw, axis_norm) = plt.subplots(1, 2, figsize=(15, 6))
+    figure.patch.set_facecolor("white")
+
+    for axis in (axis_raw, axis_norm):
+        axis.set_facecolor("white")
+
+    for key, points_by_size in sorted(series.items()):
+        points = [points_by_size[size] for size in ordered_sizes if size in points_by_size]
+        if not points:
+            continue
+        xs = [position[int(item[x_key])] for item in points]
+        work_per_edge = [item["work_per_edge"] for item in points]
+        baseline = work_per_edge[0] if work_per_edge[0] else 1.0
+        normalized = [value / baseline for value in work_per_edge]
+        color = SERIES_STYLES.get(key, {}).get("color")
+        label = SERIES_LABELS_PT.get(key, f"{key[0]} / {key[1]}")
+        for axis, ys in ((axis_raw, work_per_edge), (axis_norm, normalized)):
+            axis.plot(
+                xs, ys, label=label, color=color, linewidth=2.4, zorder=3,
+                solid_capstyle="round",
+            )
+            axis.scatter(xs, ys, color=color, s=46, edgecolors="white", linewidths=1.2, zorder=4)
+
+    axis_raw.set_title("Trabalho por aresta", fontsize=13, fontweight="bold", pad=10)
+    axis_raw.set_ylabel("Operações / aresta")
+    axis_norm.set_title(
+        "Taxa de crescimento (relativa ao menor grafo)", fontsize=13, fontweight="bold", pad=10
+    )
+    axis_norm.set_ylabel("Trabalho/aresta relativo")
+
+    for axis in (axis_raw, axis_norm):
+        axis.set_xlabel("Número de vértices")
+        axis.set_xticks(range(len(ordered_sizes)))
+        axis.set_xticklabels([format_count(size) for size in ordered_sizes])
+        axis.margins(x=0.02)
+        axis.grid(True, which="both", linestyle="--", linewidth=0.7, alpha=0.45)
+        for spine in ("top", "right"):
+            axis.spines[spine].set_visible(False)
+        axis.legend(title="Algoritmo", frameon=True, framealpha=0.9)
+
+    figure.suptitle(
+        "Complexidade empírica: BMSSP O(m log^(2/3) n) vs Dijkstra O(m log n)",
+        fontsize=15, fontweight="bold",
+    )
+    if subtitle:
+        figure.text(0.5, 0.925, subtitle, ha="center", va="bottom", fontsize=9, color="#475569")
+    figure.tight_layout(rect=(0, 0, 1, 0.93))
+
+    pdf_path.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(pdf_path)
+    figure.savefig(jpg_path, dpi=200)
+    plt.close(figure)
+    console.success(
+        f"Saved complexity plots: {pdf_path.relative_to(root)} and {jpg_path.relative_to(root)}"
+    )
+
+
+def _rel(path: Path, root: Path) -> str:
+    """Path relative to root when possible, else the path unchanged."""
+    try:
+        return str(path.relative_to(root))
+    except ValueError:
+        return str(path)
+
+
+def _format_big_n(value: float) -> str:
+    """Render a large vertex count as a power of ten, e.g. 1.2e11 -> '~10^11'."""
+    if value <= 0:
+        return "n/d"
+    exponent = math.log10(value)
+    return f"~10^{exponent:.0f}"
+
+
+def render_crossover_figure(
+    results: list[dict[str, Any]],
+    pdf_path: Path,
+    jpg_path: Path,
+    root: Path,
+    console: Console,
+) -> None:
+    """Plot the BMSSP/Dijkstra work-per-edge ratio and extrapolate its crossover.
+
+    The ratio of weighted work per edge between BMSSP and Dijkstra falls roughly
+    linearly with ``ln(n)`` -- the empirical signature of ``log^(2/3) n`` growing
+    slower than ``log n``. Fitting that line and extending it to the point where it
+    reaches 1.0 estimates the graph size at which BMSSP would do *less* total work
+    than Dijkstra. That size is far beyond any in-memory input, so the dashed
+    extrapolation is labelled explicitly as a projection from measured points, not
+    a measurement -- honest for a slide.
+    """
+    by_size: dict[int, dict[str, float]] = defaultdict(dict)
+    for result in results:
+        if result.get("type") != "sequential" or "work_per_edge" not in result:
+            continue
+        by_size[int(result["vertices"])][result["model"]] = float(result["work_per_edge"])
+
+    points = sorted(
+        (size, models["bmssp"] / models["dijkstra"])
+        for size, models in by_size.items()
+        if "bmssp" in models and "dijkstra" in models and models["dijkstra"] > 0
+    )
+    if len(points) < 2:
+        console.detail("Not enough points to draw the crossover extrapolation.")
+        return
+
+    sizes = [size for size, _ in points]
+    ratios = [ratio for _, ratio in points]
+    ln_sizes = [math.log(size) for size in sizes]
+
+    # Least-squares fit ratio ~ slope * ln(n) + intercept.
+    count = len(points)
+    mean_x = sum(ln_sizes) / count
+    mean_y = sum(ratios) / count
+    denominator = sum((x - mean_x) ** 2 for x in ln_sizes)
+    slope = (
+        sum((x - mean_x) * (y - mean_y) for x, y in zip(ln_sizes, ratios)) / denominator
+        if denominator
+        else 0.0
+    )
+    intercept = mean_y - slope * mean_x
+    crossover_n = math.exp((1.0 - intercept) / slope) if slope < 0 else 0.0
+
+    plt.style.use("default")
+    figure, axis = plt.subplots(figsize=(11, 6))
+    figure.patch.set_facecolor("white")
+    axis.set_facecolor("white")
+
+    measured_color = "#7c3aed"
+    axis.plot(ln_sizes, ratios, color=measured_color, linewidth=2.6, zorder=3,
+              solid_capstyle="round", label="Razão medida (BMSSP / Dijkstra)")
+    axis.scatter(ln_sizes, ratios, color=measured_color, s=52, edgecolors="white",
+                 linewidths=1.3, zorder=4)
+
+    # Extrapolated fit out to the crossover (or one decade past the data).
+    right_ln = math.log(crossover_n) if crossover_n > sizes[-1] else ln_sizes[-1] + math.log(10)
+    fit_x = [ln_sizes[0], right_ln]
+    fit_y = [slope * x + intercept for x in fit_x]
+    axis.plot(fit_x, fit_y, color="#475569", linewidth=1.8, linestyle="--", zorder=2,
+              label="Ajuste linear em ln(n) (extrapolado)")
+    axis.axhline(1.0, color="#dc2626", linewidth=1.4, linestyle=":", zorder=1,
+                 label="Empate de trabalho (razão = 1)")
+
+    if crossover_n > sizes[-1]:
+        cross_x = math.log(crossover_n)
+        axis.scatter([cross_x], [1.0], color="#dc2626", s=80, zorder=5, marker="X")
+        axis.annotate(
+            f"Cruzamento projetado: n {_format_big_n(crossover_n)}",
+            xy=(cross_x, 1.0), xytext=(cross_x, 1.0 + (max(ratios) - 1.0) * 0.28),
+            ha="center", color="#b91c1c", fontsize=10, fontweight="bold",
+            arrowprops={"arrowstyle": "->", "color": "#b91c1c"},
+        )
+
+    axis.set_title(
+        "Razão de trabalho BMSSP/Dijkstra cai com o tamanho do grafo",
+        fontsize=14, fontweight="bold", pad=26,
+    )
+    axis.text(
+        0.5, 1.03,
+        "Tendência medida extrapolada até o empate de trabalho (projeção além da memória)",
+        transform=axis.transAxes, ha="center", va="bottom", fontsize=9, color="#475569",
+    )
+    axis.set_xlabel("ln(número de vértices)")
+    axis.set_ylabel("Trabalho/aresta: BMSSP ÷ Dijkstra")
+
+    # Secondary x ticks showing the actual sizes at the measured points.
+    tick_positions = ln_sizes + ([math.log(crossover_n)] if crossover_n > sizes[-1] else [])
+    tick_labels = [format_count(size) for size in sizes] + (
+        [_format_big_n(crossover_n)] if crossover_n > sizes[-1] else []
+    )
+    axis.set_xticks(tick_positions)
+    axis.set_xticklabels(tick_labels, rotation=30, ha="right")
+    axis.margins(x=0.04)
+    axis.grid(True, linestyle="--", linewidth=0.7, alpha=0.45)
+    for spine in ("top", "right"):
+        axis.spines[spine].set_visible(False)
+    axis.legend(frameon=True, framealpha=0.9, loc="upper right")
+    figure.tight_layout()
+
+    pdf_path.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(pdf_path)
+    figure.savefig(jpg_path, dpi=200)
+    plt.close(figure)
+    console.success(
+        f"Saved crossover plot: {_rel(pdf_path, root)} and {_rel(jpg_path, root)} "
+        f"(projected crossover at n {_format_big_n(crossover_n)})"
     )

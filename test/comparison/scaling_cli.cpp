@@ -3,6 +3,7 @@
 #include "parallel_dijkstra_solver.h"
 #include "parallel_solver.h"
 #include "sequential_solver.h"
+#include "work_counter.h"
 
 #include <algorithm>
 #include <chrono>
@@ -36,12 +37,20 @@ void run_solver(const std::string_view model, const std::string_view type, Solve
   // Measure full single-source shortest paths (source to all vertices). This is
   // where the BMSSP asymptotic advantage over Dijkstra shows up as the graph
   // grows, because the whole shortest-path tree is built.
+  //
+  // Alongside wall-clock we report weighted ordered-structure work: the count of
+  // priority-queue / block-queue operations charged by the complexity analysis
+  // (log n per heap op for Dijkstra, the Lemma 3.3 costs for BMSSP). Wall-clock
+  // is dominated by constant factors and the constant-degree transformation, so
+  // the work metric is what actually exhibits the O(m log^(2/3) n) exponent.
+  sssp::WorkCounter::reset();
   const auto start = Clock::now();
   const std::vector<double> distances = solver.solve_all(source);
   const double elapsed_ms = std::chrono::duration<double, std::milli>(Clock::now() - start).count();
+  const double work = sssp::WorkCounter::total();
 
   std::cout << "RESULT|" << step << '|' << model << '|' << type << '|' << reachable_count(distances)
-            << '|' << elapsed_ms << '\n'
+            << '|' << elapsed_ms << '|' << work << '\n'
             << std::flush;
 }
 

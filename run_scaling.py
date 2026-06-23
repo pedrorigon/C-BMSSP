@@ -26,7 +26,18 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from bench_common import Console, render_scaling_figure, summarize_samples
+try:
+    import resource
+except ImportError:  # pragma: no cover - non-POSIX fallback
+    resource = None  # type: ignore[assignment]
+
+from bench_common import (
+    Console,
+    render_complexity_figure,
+    render_crossover_figure,
+    render_scaling_figure,
+    summarize_samples,
+)
 
 
 ROOT = Path(__file__).resolve().parent
@@ -40,11 +51,21 @@ DEFAULT_ITERATIONS = 10
 # topology (large diameter, --topology banded) is available for the sparse,
 # inherently more serial regime that favours the BMSSP sequential solver.
 DEFAULT_TOPOLOGY = "random"
-DEFAULT_DEGREE = 8
+# Sparse graphs (low average degree) are the fairest regime for BMSSP: the
+# constant-degree transformation adds fewer extra vertices, so the BMSSP/Dijkstra
+# work ratio is smallest and its growth exponent is most clearly below Dijkstra's.
+DEFAULT_DEGREE = 4
 DEFAULT_BANDWIDTH = 64
 DEFAULT_SEED = 42
-DEFAULT_MAX_VERTICES = 10_000_000
+DEFAULT_MAX_VERTICES = 100_000_000
 DEFAULT_STEPS = 12
+# Per-run address-space cap. The BMSSP constant-degree transform needs ~17x the
+# original vertices, so large sizes exhaust memory; the cap (RLIMIT_AS) makes the
+# allocation fail cleanly with bad_alloc instead of letting the kernel OOM-kill
+# the process after a long thrash. Keep it comfortably below total RAM so the
+# limit fires first. Dijkstra, scaling on the untransformed graph, reaches the
+# largest sizes well under this cap.
+DEFAULT_MEMORY_LIMIT_GB = 16.0
 
 CSV_FIELDS = [
     "run_timestamp",
@@ -66,6 +87,10 @@ CSV_FIELDS = [
     "vertices",
     "edges",
     "reachable",
+    # Weighted ordered-structure work (deterministic per graph). The complexity
+    # claim is read from work/edges, not from wall-clock time.
+    "work",
+    "work_per_edge",
 ]
 
 
@@ -139,6 +164,17 @@ def parse_args() -> argparse.Namespace:
         help=f"Number of geometrically spaced sizes to benchmark (default: {DEFAULT_STEPS}).",
     )
     parser.add_argument(
+        "--memory-limit-gb",
+        type=float,
+        default=DEFAULT_MEMORY_LIMIT_GB,
+        help=(
+            "Per-run address-space cap in GiB. A run that exceeds it is killed and "
+            "that size is dropped for that model, so BMSSP stops at its memory ceiling "
+            "while Dijkstra keeps scaling. 0 disables the cap "
+            f"(default: {DEFAULT_MEMORY_LIMIT_GB:g})."
+        ),
+    )
+    parser.add_argument(
         "--skip-build",
         action="store_true",
         help="Use the existing release scaling executable without rebuilding it.",
@@ -188,6 +224,17 @@ def run_build(console: Console) -> None:
     console.success(f"Scaling executable ready: {SCALING_EXECUTABLE.relative_to(ROOT)}")
 
 
+def _memory_limit_preexec(max_bytes: int):
+    """Return a preexec_fn that caps the child's address space, or None."""
+    if resource is None or max_bytes <= 0:
+        return None
+
+    def _apply() -> None:
+        resource.setrlimit(resource.RLIMIT_AS, (max_bytes, max_bytes))
+
+    return _apply
+
+
 def run_scaling_once(
     model: str,
     implementation_type: str,
@@ -196,8 +243,16 @@ def run_scaling_once(
     bandwidth: int,
     seed: int,
     sizes: list[int],
+    memory_limit_bytes: int = 0,
+    console: Console | None = None,
 ) -> tuple[dict[int, dict[str, int]], dict[tuple[int, str, str], dict[str, Any]]]:
-    """Run the executable once over all sizes; return graph metadata and results."""
+    """Run the executable once over all sizes; return graph metadata and results.
+
+    Results are streamed line by line, so if a large size exhausts memory and the
+    process is killed, every size that already completed is still returned. This is
+    what lets BMSSP stop at its memory ceiling while Dijkstra keeps scaling: the
+    caller simply gets fewer BMSSP points than Dijkstra points.
+    """
     command = [
         str(SCALING_EXECUTABLE),
         model,
@@ -209,7 +264,8 @@ def run_scaling_once(
         *(str(size) for size in sizes),
     ]
     process = subprocess.Popen(
-        command, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
+        command, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
+        preexec_fn=_memory_limit_preexec(memory_limit_bytes),
     )
     if process.stdout is None:
         raise RuntimeError("failed to capture scaling output")
@@ -222,19 +278,33 @@ def run_scaling_once(
         parts = line.split("|")
         if parts[0] == "GRAPH" and len(parts) == 4:
             graphs[int(parts[1])] = {"vertices": int(parts[2]), "edges": int(parts[3])}
-        elif parts[0] == "RESULT" and len(parts) == 6:
+        elif parts[0] == "RESULT" and len(parts) == 7:
             step = int(parts[1])
             results[(step, parts[2], parts[3])] = {
                 "model": parts[2],
                 "type": parts[3],
                 "reachable": int(parts[4]),
                 "time_seconds": float(parts[5]) / 1000.0,
+                # Weighted ordered-structure work charged by the complexity
+                # analysis (see work_counter.h). This, not wall-clock, is what
+                # exhibits the O(m log^(2/3) n) exponent.
+                "work": float(parts[6]),
             }
         elif line:
             messages.append(line)
 
-    if process.wait() != 0:
-        raise RuntimeError("\n".join(messages) or "scaling executable failed")
+    return_code = process.wait()
+    if return_code != 0:
+        # A non-zero exit at a large size (OOM / address-space cap) is expected for
+        # BMSSP. Keep the results gathered so far instead of aborting the sweep.
+        if results and console is not None:
+            largest_done = max(graphs) if graphs else -1
+            console.detail(
+                f"{model} stopped after step {largest_done} "
+                f"(exit {return_code}); larger sizes exceed the memory ceiling."
+            )
+        elif not results:
+            raise RuntimeError("\n".join(messages) or "scaling executable failed")
     return graphs, results
 
 
@@ -250,14 +320,17 @@ def run_scaling(
     identities: dict[tuple[int, str, str], dict[str, Any]] = {}
     samples: dict[tuple[int, str, str], list[float]] = defaultdict(list)
 
+    memory_limit_bytes = int(args.memory_limit_gb * (1024 ** 3))
     for iteration in range(1, args.iterations + 1):
         console.detail(f"Iteration {iteration}/{args.iterations}")
         graphs_run, results_run = run_scaling_once(
             model, implementation_type, args.topology, args.avg_degree,
-            args.bandwidth, args.seed, sizes,
+            args.bandwidth, args.seed, sizes, memory_limit_bytes, console,
         )
-        if not graphs:
-            graphs = graphs_run
+        # Keep the widest graph metadata seen (later models/iterations may reach
+        # sizes an earlier, memory-bound model could not).
+        for step, meta in graphs_run.items():
+            graphs.setdefault(step, meta)
         for key, result in results_run.items():
             identities.setdefault(key, result)
             samples[key].append(result["time_seconds"])
@@ -271,6 +344,8 @@ def run_scaling(
                 f"Size {graph['vertices']:,} vertices, {graph['edges']:,} edges"
             )
             last_step = step
+        work = identity["work"]
+        edges = graph["edges"]
         result = {
             "run_timestamp": run_timestamp,
             "model": identity["model"],
@@ -283,6 +358,8 @@ def run_scaling(
             "reachable": identity["reachable"],
             **summarize_samples(samples[(step, _model, _type)]),
             **graph,
+            "work": work,
+            "work_per_edge": work / edges if edges else 0.0,
         }
         results.append(result)
         spread = (
@@ -329,7 +406,17 @@ def main() -> int:
             console.success("Using the existing release scaling executable")
         else:
             run_build(console)
-        results = run_scaling(model, implementation_type, args, sizes, timestamp, console)
+        # Run each model in its own subprocess group rather than passing "all" to a
+        # single process. Otherwise a BMSSP out-of-memory abort at a large size
+        # would also kill Dijkstra mid-sweep, capping Dijkstra at BMSSP's ceiling.
+        # Separately, Dijkstra scales on the untransformed graph and reaches the
+        # full size range while BMSSP stops where its transform no longer fits.
+        models = ("bmssp", "dijkstra") if model == "all" else (model,)
+        results = []
+        for single_model in models:
+            results.extend(
+                run_scaling(single_model, implementation_type, args, sizes, timestamp, console)
+            )
     except Exception as error:
         console.error(str(error))
         return 1
@@ -351,6 +438,23 @@ def main() -> int:
     render_scaling_figure(
         results, "vertices", "Graph size (number of vertices)", subtitle, True,
         target_dir / f"{base}_log.pdf", target_dir / f"{base}_log.jpg", ROOT, console,
+    )
+
+    console.step("Generating empirical-complexity plot (weighted work per edge)")
+    topology_pt = "aleatórios" if args.topology == "random" else "em faixa"
+    complexity_subtitle = (
+        f"Grafos esparsos {topology_pt} (grau médio {args.avg_degree}), SSSP completo; "
+        "trabalho ponderado por aresta (determinístico, independente do tempo)"
+    )
+    render_complexity_figure(
+        results, "vertices", "Graph size (number of vertices)", complexity_subtitle,
+        target_dir / f"{base}_complexity.pdf", target_dir / f"{base}_complexity.jpg", ROOT, console,
+    )
+
+    console.step("Generating work-ratio crossover extrapolation")
+    render_crossover_figure(
+        results,
+        target_dir / f"{base}_crossover.pdf", target_dir / f"{base}_crossover.jpg", ROOT, console,
     )
 
     elapsed = (datetime.now() - started_at).total_seconds()

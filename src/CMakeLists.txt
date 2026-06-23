@@ -3,6 +3,7 @@ find_package(OpenMP)
 add_library(
     sssp
     core/block_queue.cpp
+    core/constant_degree_graph.cpp
     core/dimacs_reader.cpp
     core/graph.cpp
     core/parallel_solver.cpp

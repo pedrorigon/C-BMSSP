@@ -1,5 +1,7 @@
 #include "dijkstra_solver.h"
 
+#include "work_counter.h"
+
 #include <algorithm>
 #include <functional>
 #include <queue>
@@ -15,6 +17,17 @@ using QueueEntry = std::pair<double, sssp::Vertex>;
 DijkstraSolver::DijkstraSolver(const sssp::Graph& graph)
     : graph_(graph), distances_(graph.vertex_count(), sssp::infinity),
       predecessors_(graph.vertex_count(), graph.vertex_count()) {}
+
+void DijkstraSolver::set_trace_callback(sssp::SearchTraceCallback callback) {
+  trace_callback_ = std::move(callback);
+}
+
+void DijkstraSolver::trace(const sssp::SearchEventKind kind, const sssp::Vertex vertex,
+                           const double distance) const {
+  if (trace_callback_) {
+    trace_callback_({kind, vertex, distance});
+  }
+}
 
 void DijkstraSolver::reset() {
   std::fill(distances_.begin(), distances_.end(), sssp::infinity);
@@ -42,6 +55,7 @@ sssp::PathResult DijkstraSolver::solve(const sssp::Vertex source, const sssp::Ve
     if (distance > distances_[vertex]) {
       continue;
     }
+    trace(sssp::SearchEventKind::settled, vertex, distance);
     if (vertex == goal) {
       return {distance, reconstruct_path(source, goal)};
     }
@@ -50,6 +64,7 @@ sssp::PathResult DijkstraSolver::solve(const sssp::Vertex source, const sssp::Ve
       if (candidate < distances_[edge.to]) {
         distances_[edge.to] = candidate;
         predecessors_[edge.to] = vertex;
+        trace(sssp::SearchEventKind::relaxation, edge.to, candidate);
         queue.emplace(candidate, edge.to);
       }
     }
@@ -66,16 +81,22 @@ std::vector<double> DijkstraSolver::solve_all(const sssp::Vertex source) {
   queue.emplace(0.0, source);
 
   while (!queue.empty()) {
+    // An extract-min sifts down through a heap of the current size: O(log n).
+    sssp::WorkCounter::add_log(queue.size());
     const auto [distance, vertex] = queue.top();
     queue.pop();
     if (distance > distances_[vertex]) {
       continue;
     }
+    trace(sssp::SearchEventKind::settled, vertex, distance);
     for (const auto& edge : graph_.edges_from(vertex)) {
       const double candidate = distance + edge.weight;
       if (candidate < distances_[edge.to]) {
         distances_[edge.to] = candidate;
         predecessors_[edge.to] = vertex;
+        trace(sssp::SearchEventKind::relaxation, edge.to, candidate);
+        // A decrease-key, modelled here as a lazy insertion, sifts up: O(log n).
+        sssp::WorkCounter::add_log(queue.size());
         queue.emplace(candidate, edge.to);
       }
     }

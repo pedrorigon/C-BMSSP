@@ -83,6 +83,17 @@ ParallelDijkstraSolver::ParallelDijkstraSolver(const sssp::Graph& graph)
       predecessors_(graph.vertex_count(), graph.vertex_count()),
       complete_(graph.vertex_count(), false) {}
 
+void ParallelDijkstraSolver::set_trace_callback(sssp::SearchTraceCallback callback) {
+  trace_callback_ = std::move(callback);
+}
+
+void ParallelDijkstraSolver::trace(const sssp::SearchEventKind kind, const sssp::Vertex vertex,
+                                   const double distance) const {
+  if (trace_callback_) {
+    trace_callback_({kind, vertex, distance});
+  }
+}
+
 void ParallelDijkstraSolver::reset() {
   std::fill(distances_.begin(), distances_.end(), sssp::infinity);
   std::fill(predecessors_.begin(), predecessors_.end(), graph_.vertex_count());
@@ -151,6 +162,7 @@ void ParallelDijkstraSolver::run(const sssp::Vertex source, const sssp::Vertex* 
     if (candidate < best || (candidate == best && from < predecessors_[edge.to])) {
       best = candidate;
       predecessors_[edge.to] = from;
+      trace(sssp::SearchEventKind::relaxation, edge.to, candidate);
       place(edge.to);
     }
   };
@@ -172,6 +184,7 @@ void ParallelDijkstraSolver::run(const sssp::Vertex source, const sssp::Vertex* 
     if (frontier.size() < kParallelThreshold) {
       for (const sssp::Vertex from : frontier) {
         const double base = distances_[from];
+        trace(sssp::SearchEventKind::settled, from, base);
         for (const auto& edge : graph_.edges_from(from)) {
           if ((edge.weight <= delta) == want_light) {
             relax_edge(from, edge, base);
@@ -195,6 +208,7 @@ void ParallelDijkstraSolver::run(const sssp::Vertex source, const sssp::Vertex* 
 #endif
       const sssp::Vertex from = frontier[i];
       const double base = distances_[from];
+      trace(sssp::SearchEventKind::settled, from, base);
       for (const auto& edge : graph_.edges_from(from)) {
         if ((edge.weight <= delta) != want_light) {
           continue;
@@ -220,6 +234,7 @@ void ParallelDijkstraSolver::run(const sssp::Vertex source, const sssp::Vertex* 
       if (best.distance < distances_[best.target]) {
         distances_[best.target] = best.distance;
         predecessors_[best.target] = best.predecessor;
+        trace(sssp::SearchEventKind::relaxation, best.target, best.distance);
         place(best.target);
       }
       const sssp::Vertex target = best.target;
@@ -228,8 +243,6 @@ void ParallelDijkstraSolver::run(const sssp::Vertex source, const sssp::Vertex* 
       }
     }
   };
-
-  static_cast<void>(goal); // run always computes full SSSP; callers read distances_.
 
   std::vector<sssp::Vertex> frontier;
   for (std::size_t current = 0; current < buckets.size(); ++current) {
@@ -269,6 +282,10 @@ void ParallelDijkstraSolver::run(const sssp::Vertex source, const sssp::Vertex* 
     // Deduplicate first, since a vertex can be removed more than once.
     std::sort(removed.begin(), removed.end());
     removed.erase(std::unique(removed.begin(), removed.end()), removed.end());
+    if (goal && std::ranges::find(removed, *goal) != removed.end()) {
+      complete_[*goal] = true;
+      return;
+    }
     process(removed, /*want_light=*/false);
   }
 }
